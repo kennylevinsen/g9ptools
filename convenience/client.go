@@ -1,0 +1,268 @@
+package convenience
+
+import (
+	"bytes"
+	"errors"
+	"io"
+	"net"
+	"strings"
+
+	"github.com/joushou/g9p"
+	"github.com/joushou/g9p/protocol"
+)
+
+const (
+	DefaultMaxSize = 128 * 1024
+	Version        = "9P2000"
+)
+
+var (
+	ErrUnknownProtocol  = errors.New("unknown protocol")
+	ErrClientNotStarted = errors.New("client not started")
+	ErrNoSuchFile       = errors.New("no such file")
+	ErrNotADirectory    = errors.New("not a directory")
+)
+
+type Client struct {
+	c       *g9p.Client
+	maxSize uint32
+	root    protocol.Fid
+	nextFid protocol.Fid
+}
+
+func (c *Client) getFid() protocol.Fid {
+	// We need to skip NOFID (highest value) and 0 (our root)
+	if c.nextFid == protocol.NOFID {
+		c.nextFid++
+	}
+	if c.nextFid == 0 {
+		c.nextFid++
+	}
+	f := c.nextFid
+	c.nextFid++
+	return f
+}
+
+func (c *Client) setup(username, servicename string) error {
+	if c.c == nil {
+		return ErrClientNotStarted
+	}
+
+	vreq := &protocol.VersionRequest{
+		Tag:     protocol.NOTAG,
+		MaxSize: DefaultMaxSize,
+		Version: Version,
+	}
+
+	vresp, err := c.c.Version(vreq)
+	if err != nil {
+		c.c.Stop()
+		c.c = nil
+		return err
+	}
+
+	if vresp.Version != "9P2000" {
+		return ErrUnknownProtocol
+	}
+
+	c.maxSize = vresp.MaxSize
+
+	areq := &protocol.AttachRequest{
+		Tag:      c.c.NextTag(),
+		Fid:      c.root,
+		AuthFid:  protocol.NOFID,
+		Username: username,
+		Service:  servicename,
+	}
+	_, err = c.c.Attach(areq)
+	if err != nil {
+		c.c.Stop()
+		c.c = nil
+		return err
+	}
+
+	return nil
+}
+
+func (c *Client) Read(file string) ([]byte, error) {
+	_ = file
+	return nil, nil
+}
+
+func (c *Client) Write(content []byte, offset uint64, file string) error {
+	_ = content
+	_ = offset
+	_ = file
+	return nil
+}
+
+func (c *Client) readAll(fid protocol.Fid) ([]byte, error) {
+	var b []byte
+
+	for {
+		rreq := &protocol.ReadRequest{
+			Tag:    c.c.NextTag(),
+			Fid:    fid,
+			Offset: uint64(len(b)),
+			Count:  c.maxSize - 9, // The size of a response
+		}
+
+		rresp, err := c.c.Read(rreq)
+		if err != nil {
+			return nil, err
+		}
+		if len(rresp.Data) == 0 {
+			break
+		}
+		b = append(b, rresp.Data...)
+	}
+
+	return b, nil
+}
+
+func (c *Client) writeAll(fid protocol.Fid, data []byte) error {
+	var offset uint64
+	for {
+		count := int(c.maxSize - 20)
+		if len(data[offset:]) < count {
+			count = len(data[offset:])
+		}
+		wreq := &protocol.WriteRequest{
+			Tag:    c.c.NextTag(),
+			Fid:    fid,
+			Offset: offset,
+			Data:   data[offset : offset+uint64(count)],
+		}
+
+		wresp, err := c.c.Write(wreq)
+		if err != nil {
+			return err
+		}
+		offset += uint64(wresp.Count)
+	}
+
+	return nil
+}
+
+func (c *Client) walkTo(file string) (protocol.Fid, protocol.Qid, error) {
+	s := strings.Split(file, "/")
+	if s[len(s)-1] == "" {
+		if len(s) == 1 {
+			s = nil
+		} else {
+			s = s[len(s)-2]
+		}
+	}
+
+	wreq := &protocol.WalkRequest{
+		Tag:    c.c.NextTag(),
+		Fid:    c.root,
+		NewFid: c.getFid(),
+		Names:  s,
+	}
+	wresp, err := c.c.Walk(wreq)
+	if err != nil {
+		return protocol.NOFID, protocol.Qid{}, err
+	}
+
+	if len(wresp.Qids) != len(wreq.Names) {
+		return protocol.NOFID, protocol.Qid{}, ErrNoSuchFile
+	}
+
+	end := len(wresp.Qids) - 1
+	for i, q := range wresp.Qids {
+		if i == end {
+			break
+		}
+		if q.Type&protocol.QTDIR == 0 {
+			return protocol.NOFID, protocol.Qid{}, ErrNotADirectory
+		}
+	}
+
+	return wreq.NewFid, wresp.Qids[end], nil
+}
+
+func (c *Client) clunk(fid protocol.Fid) {
+	creq := &protocol.ClunkRequest{
+		Tag: c.c.NextTag(),
+		Fid: fid,
+	}
+	c.c.Clunk(creq)
+}
+
+func (c *Client) List(file string) ([]string, error) {
+	fid, err := c.walkTo(file)
+	if err != nil {
+		return nil, err
+	}
+
+	defer c.clunk(fid)
+
+	oreq := &protocol.OpenRequest{
+		Tag:  c.c.NextTag(),
+		Fid:  fid,
+		Mode: protocol.OREAD,
+	}
+	_, err = c.c.Open(oreq)
+	if err != nil {
+		return nil, err
+	}
+
+	b, err := c.readAll(fid)
+	if err != nil {
+		return nil, err
+	}
+
+	buf := bytes.NewBuffer(b)
+	var strs []string
+	for buf.Len() > 0 {
+		x := &protocol.Stat{}
+		if err := x.Decode(buf); err != nil {
+			return nil, err
+		}
+		if x.Mode&protocol.DMDIR == 0 {
+			strs = append(strs, x.Name)
+		} else {
+			strs = append(strs, x.Name+"/")
+		}
+	}
+
+	return strs, nil
+}
+
+func (c *Client) Create(name string) error {
+	_ = name
+	return nil
+}
+
+func (c *Client) Remove(name string) error {
+	_ = name
+	return nil
+}
+
+func (c *Client) Dial(network, address, username, servicename string) error {
+	conn, err := net.Dial(network, address)
+	if err != nil {
+		return err
+	}
+
+	c.c = g9p.NewClient(conn)
+	go c.c.Start()
+
+	err = c.setup(username, servicename)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *Client) Connect(rw io.ReadWriter, username, servicename string) error {
+	c.c = g9p.NewClient(rw)
+	go c.c.Start()
+
+	err := c.setup(username, servicename)
+	if err != nil {
+		return err
+	}
+	return nil
+}
