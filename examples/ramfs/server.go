@@ -303,7 +303,7 @@ func (rfs *RamFS) Read(r *protocol.ReadRequest) (*protocol.ReadResponse, error) 
 		return nil, fmt.Errorf("file not open")
 	}
 
-	if s.mode != protocol.OREAD || s.mode != protocol.ORDWR {
+	if s.mode != protocol.OREAD && s.mode != protocol.ORDWR {
 		return nil, fmt.Errorf("file not opened for reading")
 	}
 
@@ -367,7 +367,7 @@ func (rfs *RamFS) Write(r *protocol.WriteRequest) (*protocol.WriteResponse, erro
 		return nil, fmt.Errorf("file not open")
 	}
 
-	if s.mode != protocol.OWRITE || s.mode != protocol.ORDWR {
+	if s.mode != protocol.OWRITE && s.mode != protocol.ORDWR {
 		return nil, fmt.Errorf("file not opened for writing")
 	}
 

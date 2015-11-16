@@ -1,58 +1,81 @@
 package main
 
 import (
-	"bytes"
-	"log"
-	"net"
+	"fmt"
+	"os"
 
-	"github.com/joushou/g9p"
-	"github.com/joushou/g9p/protocol"
+	"github.com/joushou/g9ptools/convenience"
 )
 
 func main() {
-	conn, err := net.Dial("tcp", "localhost:8080")
-	if err != nil {
-		log.Printf("error: %v", err)
+	if len(os.Args) < 5 {
+		fmt.Printf("Too few arguments\n")
 		return
 	}
-	c := g9p.NewClient(conn)
-	go c.Start()
 
-	_, err = c.Version(&protocol.VersionRequest{
-		Tag:     c.NextTag(),
-		MaxSize: 1024,
-		Version: "9P2000",
-	})
-	_, err = c.Attach(&protocol.AttachRequest{
-		Tag:      c.NextTag(),
-		Fid:      1,
-		AuthFid:  protocol.NOFID,
-		Username: "none",
-		Service:  "something",
-	})
-	_, err = c.Open(&protocol.OpenRequest{
-		Tag:  c.NextTag(),
-		Fid:  1,
-		Mode: protocol.OEXEC,
-	})
-	v4, err := c.Read(&protocol.ReadRequest{
-		Tag:    c.NextTag(),
-		Fid:    1,
-		Offset: 0,
-		Count:  10 * 1024,
-	})
+	addr := os.Args[1]
+	user := os.Args[2]
+	service := os.Args[3]
 
-	buf := bytes.NewBuffer(v4.Data)
-
-	log.Printf("Length: %v", buf.Len())
-	var ss []protocol.Stat
-	for buf.Len() > 0 {
-		s := protocol.Stat{}
-		s.Decode(buf)
-		ss = append(ss, s)
+	c := &convenience.Client{}
+	err := c.Dial("tcp", addr, user, service)
+	if err != nil {
+		fmt.Printf("Connect failed: %v\n", err)
+		return
 	}
 
-	for _, s := range ss {
-		log.Printf("Stat: %v", s.Name)
+	switch os.Args[4] {
+	case "ls":
+		p := "/"
+		if len(os.Args) >= 6 {
+			p = os.Args[5]
+		}
+		strs, err := c.List(p)
+		if err != nil {
+			fmt.Printf("cmd failed: %v\n", err)
+			return
+		}
+		fmt.Printf("%v\n", strs)
+	case "cat":
+		if len(os.Args) < 6 {
+			fmt.Printf("not enough arguments\n")
+		}
+		p := os.Args[5]
+		strs, err := c.Read(p)
+		if err != nil {
+			fmt.Printf("cmd failed: %v\n", err)
+			return
+		}
+		fmt.Printf("%v\n", strs)
+	case "touch":
+		if len(os.Args) < 6 {
+			fmt.Printf("not enough arguments\n")
+		}
+		p := os.Args[5]
+		err := c.Create(p, false)
+		if err != nil {
+			fmt.Printf("cmd failed: %v\n", err)
+			return
+		}
+	case "mkdir":
+		if len(os.Args) < 6 {
+			fmt.Printf("not enough arguments\n")
+		}
+		p := os.Args[5]
+		err := c.Create(p, true)
+		if err != nil {
+			fmt.Printf("cmd failed: %v\n", err)
+			return
+		}
+	case "rm":
+		if len(os.Args) < 6 {
+			fmt.Printf("not enough arguments\n")
+		}
+		p := os.Args[5]
+		err := c.Remove(p)
+		if err != nil {
+			fmt.Printf("cmd failed: %v\n", err)
+			return
+		}
 	}
 }

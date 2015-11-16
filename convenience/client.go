@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"path"
 	"strings"
 
 	"github.com/joushou/g9p"
@@ -84,18 +85,6 @@ func (c *Client) setup(username, servicename string) error {
 	return nil
 }
 
-func (c *Client) Read(file string) ([]byte, error) {
-	_ = file
-	return nil, nil
-}
-
-func (c *Client) Write(content []byte, offset uint64, file string) error {
-	_ = content
-	_ = offset
-	_ = file
-	return nil
-}
-
 func (c *Client) readAll(fid protocol.Fid) ([]byte, error) {
 	var b []byte
 
@@ -146,13 +135,14 @@ func (c *Client) writeAll(fid protocol.Fid, data []byte) error {
 
 func (c *Client) walkTo(file string) (protocol.Fid, protocol.Qid, error) {
 	s := strings.Split(file, "/")
-	if s[len(s)-1] == "" {
-		if len(s) == 1 {
-			s = nil
-		} else {
-			s = s[len(s)-2]
+
+	var strs []string
+	for _, str := range s {
+		if str != "" {
+			strs = append(strs, str)
 		}
 	}
+	s = strs
 
 	wreq := &protocol.WalkRequest{
 		Tag:    c.c.NextTag(),
@@ -169,17 +159,21 @@ func (c *Client) walkTo(file string) (protocol.Fid, protocol.Qid, error) {
 		return protocol.NOFID, protocol.Qid{}, ErrNoSuchFile
 	}
 
-	end := len(wresp.Qids) - 1
-	for i, q := range wresp.Qids {
-		if i == end {
-			break
+	q := protocol.Qid{}
+	if len(wresp.Qids) > 0 {
+		end := len(wresp.Qids) - 1
+		for i, q := range wresp.Qids {
+			if i == end {
+				break
+			}
+			if q.Type&protocol.QTDIR == 0 {
+				return protocol.NOFID, protocol.Qid{}, ErrNotADirectory
+			}
 		}
-		if q.Type&protocol.QTDIR == 0 {
-			return protocol.NOFID, protocol.Qid{}, ErrNotADirectory
-		}
+		q = wresp.Qids[end]
 	}
 
-	return wreq.NewFid, wresp.Qids[end], nil
+	return wreq.NewFid, q, nil
 }
 
 func (c *Client) clunk(fid protocol.Fid) {
@@ -190,12 +184,51 @@ func (c *Client) clunk(fid protocol.Fid) {
 	c.c.Clunk(creq)
 }
 
-func (c *Client) List(file string) ([]string, error) {
-	fid, err := c.walkTo(file)
+func (c *Client) Read(file string) ([]byte, error) {
+	fid, _, err := c.walkTo(file)
+	if err != nil {
+		return nil, err
+	}
+	defer c.clunk(fid)
+
+	oreq := &protocol.OpenRequest{
+		Tag:  c.c.NextTag(),
+		Fid:  fid,
+		Mode: protocol.OREAD,
+	}
+	_, err = c.c.Open(oreq)
 	if err != nil {
 		return nil, err
 	}
 
+	return c.readAll(fid)
+}
+
+func (c *Client) Write(content []byte, file string) error {
+	fid, _, err := c.walkTo(file)
+	if err != nil {
+		return err
+	}
+	defer c.clunk(fid)
+
+	oreq := &protocol.OpenRequest{
+		Tag:  c.c.NextTag(),
+		Fid:  fid,
+		Mode: protocol.OWRITE,
+	}
+	_, err = c.c.Open(oreq)
+	if err != nil {
+		return err
+	}
+
+	return c.writeAll(fid, content)
+}
+
+func (c *Client) List(file string) ([]string, error) {
+	fid, _, err := c.walkTo(file)
+	if err != nil {
+		return nil, err
+	}
 	defer c.clunk(fid)
 
 	oreq := &protocol.OpenRequest{
@@ -230,13 +263,51 @@ func (c *Client) List(file string) ([]string, error) {
 	return strs, nil
 }
 
-func (c *Client) Create(name string) error {
-	_ = name
+func (c *Client) Create(name string, directory bool) error {
+	dir := path.Dir(name)
+	file := path.Base(name)
+
+	fid, _, err := c.walkTo(dir)
+	if err != nil {
+		return err
+	}
+	defer c.clunk(fid)
+
+	perms := protocol.FileMode(0755)
+	if directory {
+		perms |= protocol.DMDIR
+	}
+
+	creq := &protocol.CreateRequest{
+		Tag:         c.c.NextTag(),
+		Fid:         fid,
+		Name:        file,
+		Permissions: perms,
+		Mode:        protocol.OREAD,
+	}
+	_, err = c.c.Create(creq)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
 func (c *Client) Remove(name string) error {
-	_ = name
+	fid, _, err := c.walkTo(name)
+	if err != nil {
+		return err
+	}
+
+	rreq := &protocol.RemoveRequest{
+		Tag: c.c.NextTag(),
+		Fid: fid,
+	}
+	_, err = c.c.Remove(rreq)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
