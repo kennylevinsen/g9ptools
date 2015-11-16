@@ -8,8 +8,8 @@ import (
 	"sync"
 
 	"github.com/joushou/g9p"
-	"github.com/joushou/g9p/examples/tree"
 	"github.com/joushou/g9p/protocol"
+	"github.com/joushou/g9ptools/examples/tree"
 )
 
 const (
@@ -86,7 +86,8 @@ func (rfs *RamFS) Attach(r *protocol.AttachRequest) (*protocol.AttachResponse, e
 }
 
 func (rfs *RamFS) Flush(r *protocol.FlushRequest) (*protocol.FlushResponse, error) {
-	return nil, g9p.ErrCancelled
+	// TODO(kl): Handle flush!
+	return nil, g9p.ErrFlushed
 }
 
 func (rfs *RamFS) Walk(r *protocol.WalkRequest) (*protocol.WalkResponse, error) {
