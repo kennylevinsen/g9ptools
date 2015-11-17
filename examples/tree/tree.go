@@ -7,6 +7,53 @@ import (
 	"github.com/joushou/g9p/protocol"
 )
 
+type Element interface {
+	RLock()
+	RUnlock()
+	Lock()
+	Unlock()
+	Name() string
+	Qid() protocol.Qid
+	ApplyStat(protocol.Stat) error
+	Stat() protocol.Stat
+	Permissions() protocol.FileMode
+	Open(user string, mode protocol.OpenMode) error
+}
+
+type File interface {
+	Element
+	SetContent([]byte)
+	Content() []byte
+}
+
+type Dir interface {
+	Element
+	Empty() bool
+	Create(name string, perms protocol.FileMode) (Element, error)
+	Remove(Element) error
+	Walk(func(Element))
+	Find(name string) Element
+}
+
+type ElementSlice []Element
+
+func (es ElementSlice) Last() Element {
+	if len(es) == 0 {
+		return nil
+	}
+	return es[len(es)-1]
+}
+
+func (es ElementSlice) Parent() Element {
+	if len(es) == 0 {
+		return nil
+	}
+	if len(es) == 1 {
+		return es[len(es)-1]
+	}
+	return es[len(es)-2]
+}
+
 var (
 	globalIDLock sync.Mutex
 	globalID     uint64 = 0
@@ -81,7 +128,7 @@ func SetStat(user string, e Element, parent Element, nstat protocol.Stat) error 
 	}
 	if nstat.Name != "" && nstat.Name != ostat.Name {
 		if parent != nil {
-			parent := parent.(*Tree)
+			parent := parent.(Dir)
 			if e := parent.Find(nstat.Name); e != nil {
 				return errors.New("name already taken")
 			}
@@ -112,17 +159,13 @@ func SetStat(user string, e Element, parent Element, nstat protocol.Stat) error 
 		return errors.New("write permissions required to element")
 	}
 
-	x := e.(interface {
-		ApplyStat(protocol.Stat) error
-	})
-
-	return x.ApplyStat(ostat)
+	return e.ApplyStat(ostat)
 }
 
-type Tree struct {
+type RAMTree struct {
 	sync.RWMutex
-	subtrees    []*Tree
-	subfiles    []*File
+	subtrees    []*RAMTree
+	subfiles    []*RAMFile
 	id          uint64
 	name        string
 	user        string
@@ -131,7 +174,7 @@ type Tree struct {
 	permissions protocol.FileMode
 }
 
-func (t *Tree) Qid() protocol.Qid {
+func (t *RAMTree) Qid() protocol.Qid {
 	return protocol.Qid{
 		Type:    protocol.QTDIR,
 		Version: 0,
@@ -139,14 +182,14 @@ func (t *Tree) Qid() protocol.Qid {
 	}
 }
 
-func (t *Tree) Name() string {
+func (t *RAMTree) Name() string {
 	if t.name == "" {
 		return "/"
 	}
 	return t.name
 }
 
-func (t *Tree) ApplyStat(s protocol.Stat) error {
+func (t *RAMTree) ApplyStat(s protocol.Stat) error {
 	t.name = s.Name
 	t.user = s.UID
 	t.group = s.GID
@@ -154,7 +197,7 @@ func (t *Tree) ApplyStat(s protocol.Stat) error {
 	return nil
 }
 
-func (t *Tree) Stat() protocol.Stat {
+func (t *RAMTree) Stat() protocol.Stat {
 	return protocol.Stat{
 		Qid:  t.Qid(),
 		Mode: t.permissions | protocol.DMDIR,
@@ -165,11 +208,11 @@ func (t *Tree) Stat() protocol.Stat {
 	}
 }
 
-func (t *Tree) Permissions() protocol.FileMode {
+func (t *RAMTree) Permissions() protocol.FileMode {
 	return t.permissions
 }
 
-func (t *Tree) Open(user string, mode protocol.OpenMode) error {
+func (t *RAMTree) Open(user string, mode protocol.OpenMode) error {
 	owner := t.user == user
 
 	if !permCheck(owner, t.permissions, mode) {
@@ -179,15 +222,33 @@ func (t *Tree) Open(user string, mode protocol.OpenMode) error {
 	return nil
 }
 
-func (t *Tree) Empty() bool {
+func (t *RAMTree) Empty() bool {
 	return (len(t.subtrees) + len(t.subfiles)) == 0
 }
 
-func (t *Tree) Add(other Element) error {
+func (t *RAMTree) Create(name string, perms protocol.FileMode) (Element, error) {
+	if t.Find(name) != nil {
+		return nil, errors.New("file already exists")
+	}
+
+	var d Element
+	if perms&protocol.DMDIR != 0 {
+		perms = perms & (^protocol.FileMode(0777) | (t.permissions & 0777))
+		d = NewRAMTree(name, perms, t.user, t.group)
+	} else {
+		perms = perms & (^protocol.FileMode(0666) | (t.permissions & 0666))
+		d = NewRAMFile(name, perms, t.user, t.group)
+	}
+
+	t.Add(d)
+	return d, nil
+}
+
+func (t *RAMTree) Add(other Element) error {
 	switch other := other.(type) {
-	case *Tree:
+	case *RAMTree:
 		t.subtrees = append(t.subtrees, other)
-	case *File:
+	case *RAMFile:
 		t.subfiles = append(t.subfiles, other)
 	default:
 		return errors.New("unknown type")
@@ -195,27 +256,27 @@ func (t *Tree) Add(other Element) error {
 	return nil
 }
 
-func (t *Tree) Remove(other Element) bool {
+func (t *RAMTree) Remove(other Element) error {
 	switch other := other.(type) {
-	case *Tree:
+	case *RAMTree:
 		for i := range t.subtrees {
 			if t.subtrees[i] == other {
 				t.subtrees = append(t.subtrees[:i], t.subtrees[i+1:]...)
-				return true
+				return nil
 			}
 		}
-	case *File:
+	case *RAMFile:
 		for i := range t.subfiles {
 			if t.subfiles[i] == other {
 				t.subfiles = append(t.subfiles[:i], t.subfiles[i+1:]...)
-				return true
+				return nil
 			}
 		}
 	}
-	return false
+	return errors.New("no such file")
 }
 
-func (t *Tree) Walk(cb func(Element)) {
+func (t *RAMTree) Walk(cb func(Element)) {
 	for i := range t.subtrees {
 		cb(t.subtrees[i])
 	}
@@ -224,7 +285,7 @@ func (t *Tree) Walk(cb func(Element)) {
 	}
 }
 
-func (t *Tree) Find(name string) (d Element) {
+func (t *RAMTree) Find(name string) (d Element) {
 	for i := range t.subtrees {
 		if t.subtrees[i].name == name {
 			return t.subtrees[i]
@@ -240,18 +301,18 @@ func (t *Tree) Find(name string) (d Element) {
 	return nil
 }
 
-func NewTree(name string, permissions protocol.FileMode, user string) *Tree {
-	return &Tree{
+func NewRAMTree(name string, permissions protocol.FileMode, user, group string) *RAMTree {
+	return &RAMTree{
 		name:        name,
 		permissions: permissions,
 		user:        user,
-		group:       user,
+		group:       group,
 		muser:       user,
 		id:          nextID(),
 	}
 }
 
-type File struct {
+type RAMFile struct {
 	sync.RWMutex
 	content     []byte
 	id          uint64
@@ -262,11 +323,11 @@ type File struct {
 	permissions protocol.FileMode
 }
 
-func (f *File) Name() string {
+func (f *RAMFile) Name() string {
 	return f.name
 }
 
-func (f *File) Qid() protocol.Qid {
+func (f *RAMFile) Qid() protocol.Qid {
 	return protocol.Qid{
 		Type:    protocol.QTFILE,
 		Version: 0,
@@ -274,7 +335,7 @@ func (f *File) Qid() protocol.Qid {
 	}
 }
 
-func (f *File) ApplyStat(s protocol.Stat) error {
+func (f *RAMFile) ApplyStat(s protocol.Stat) error {
 	f.name = s.Name
 	f.user = s.UID
 	f.group = s.GID
@@ -282,7 +343,7 @@ func (f *File) ApplyStat(s protocol.Stat) error {
 	return nil
 }
 
-func (f *File) Stat() protocol.Stat {
+func (f *RAMFile) Stat() protocol.Stat {
 	return protocol.Stat{
 		Qid:    f.Qid(),
 		Mode:   f.permissions,
@@ -294,11 +355,11 @@ func (f *File) Stat() protocol.Stat {
 	}
 }
 
-func (f *File) Permissions() protocol.FileMode {
+func (f *RAMFile) Permissions() protocol.FileMode {
 	return f.permissions
 }
 
-func (f *File) Open(user string, mode protocol.OpenMode) error {
+func (f *RAMFile) Open(user string, mode protocol.OpenMode) error {
 	owner := f.user == user
 	if !permCheck(owner, f.permissions, mode) {
 		return errors.New("access denied")
@@ -307,48 +368,21 @@ func (f *File) Open(user string, mode protocol.OpenMode) error {
 	return nil
 }
 
-func (f *File) Content() []byte {
+func (f *RAMFile) Content() []byte {
 	return f.content
 }
 
-func (f *File) SetContent(b []byte) {
+func (f *RAMFile) SetContent(b []byte) {
 	f.content = b
 }
 
-func NewFile(name string, permissions protocol.FileMode, user string) *File {
-	return &File{
+func NewRAMFile(name string, permissions protocol.FileMode, user, group string) *RAMFile {
+	return &RAMFile{
 		name:        name,
 		permissions: permissions,
 		user:        user,
-		group:       user,
+		group:       group,
 		muser:       user,
 		id:          nextID(),
 	}
-}
-
-type Element interface {
-	Name() string
-	Qid() protocol.Qid
-	Stat() protocol.Stat
-	Permissions() protocol.FileMode
-	Open(user string, mode protocol.OpenMode) error
-}
-
-type ElementSlice []Element
-
-func (es ElementSlice) Last() Element {
-	if len(es) == 0 {
-		return nil
-	}
-	return es[len(es)-1]
-}
-
-func (es ElementSlice) Parent() Element {
-	if len(es) == 0 {
-		return nil
-	}
-	if len(es) == 1 {
-		return es[len(es)-1]
-	}
-	return es[len(es)-2]
 }

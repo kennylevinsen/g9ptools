@@ -28,7 +28,7 @@ type State struct {
 
 type RamFS struct {
 	sync.RWMutex
-	root    *tree.Tree
+	root    tree.Dir
 	maxsize uint32
 	fids    map[protocol.Fid]*State
 }
@@ -119,7 +119,7 @@ func (rfs *RamFS) Walk(r *protocol.WalkRequest) (*protocol.WalkResponse, error) 
 		return resp, nil
 	}
 
-	root, ok := s.location.Last().(*tree.Tree)
+	root, ok := s.location.Last().(tree.Dir)
 	if !ok {
 		return nil, fmt.Errorf("fid not dir")
 	}
@@ -135,6 +135,7 @@ func (rfs *RamFS) Walk(r *protocol.WalkRequest) (*protocol.WalkResponse, error) 
 		defer root.RUnlock()
 
 		if err := root.Open(s.username, protocol.OEXEC); err != nil {
+			log.Printf("Open failed: %v", err)
 			goto write
 		}
 
@@ -148,7 +149,7 @@ func (rfs *RamFS) Walk(r *protocol.WalkRequest) (*protocol.WalkResponse, error) 
 			// This is a nop, but we should still report the result
 			d = root
 			addToLoc = false
-			_, istree = d.(*tree.Tree)
+			_, istree = d.(tree.Dir)
 		case "..":
 			// Go one directory up, or nop if we're at /
 			d = newloc.Parent()
@@ -156,12 +157,13 @@ func (rfs *RamFS) Walk(r *protocol.WalkRequest) (*protocol.WalkResponse, error) 
 				newloc = newloc[:len(newloc)-1]
 				addToLoc = false
 			}
-			_, istree = d.(*tree.Tree)
+			_, istree = d.(tree.Dir)
 		default:
 			// Try to find the file
 			d = root.Find(name)
-			_, istree = d.(*tree.Tree)
+			_, istree = d.(tree.Dir)
 			if d == nil {
+				log.Printf("find failed for %v", name)
 				goto write
 			}
 		}
@@ -183,7 +185,7 @@ func (rfs *RamFS) Walk(r *protocol.WalkRequest) (*protocol.WalkResponse, error) 
 			goto write
 		}
 
-		root = d.(*tree.Tree)
+		root = d.(tree.Dir)
 
 	}
 
@@ -247,7 +249,7 @@ func (rfs *RamFS) Create(r *protocol.CreateRequest) (*protocol.CreateResponse, e
 		return nil, fmt.Errorf("illegal name")
 	}
 
-	t, ok := s.location.Last().(*tree.Tree)
+	t, ok := s.location.Last().(tree.Dir)
 	if !ok {
 		return nil, fmt.Errorf("not a directory")
 	}
@@ -263,13 +265,10 @@ func (rfs *RamFS) Create(r *protocol.CreateRequest) (*protocol.CreateResponse, e
 		return nil, fmt.Errorf("could not open directory for writing")
 	}
 
-	var l tree.Element
-	if r.Permissions&protocol.DMDIR != 0 {
-		l = tree.NewTree(r.Name, r.Permissions, s.username)
-	} else {
-		l = tree.NewFile(r.Name, r.Permissions, s.username)
+	l, err := t.Create(r.Name, r.Permissions)
+	if err != nil {
+		return nil, err
 	}
-	t.Add(l)
 
 	s.location = append(s.location, l)
 
@@ -310,14 +309,14 @@ func (rfs *RamFS) Read(r *protocol.ReadRequest) (*protocol.ReadResponse, error) 
 	var data []byte
 
 	switch x := s.location.Last().(type) {
-	case *tree.Tree:
+	case tree.Dir:
 		buf := new(bytes.Buffer)
 		x.Walk(func(e tree.Element) {
 			y := e.Stat()
 			y.Encode(buf)
 		})
 		data = buf.Bytes()
-	case *tree.File:
+	case tree.File:
 		x.RLock()
 		defer x.RUnlock()
 		data = x.Content()
@@ -372,9 +371,9 @@ func (rfs *RamFS) Write(r *protocol.WriteRequest) (*protocol.WriteResponse, erro
 	}
 
 	switch x := s.location.Last().(type) {
-	case *tree.Tree:
+	case tree.Dir:
 		return nil, fmt.Errorf("cannot write to directory")
-	case *tree.File:
+	case tree.File:
 		x.Lock()
 		defer x.Unlock()
 		c := x.Content()
@@ -442,7 +441,7 @@ func (rfs *RamFS) Remove(r *protocol.RemoveRequest) (*protocol.RemoveResponse, e
 	// Attempt to delete it.
 	l = s.location.Last()
 
-	if x, ok := l.(*tree.Tree); ok {
+	if x, ok := l.(tree.Dir); ok {
 		if !x.Empty() {
 			goto write
 		}
@@ -452,7 +451,7 @@ func (rfs *RamFS) Remove(r *protocol.RemoveRequest) (*protocol.RemoveResponse, e
 	if err := p.Open(s.username, protocol.OWRITE); err != nil {
 		goto write
 	}
-	p.(*tree.Tree).Remove(l)
+	p.(tree.Dir).Remove(l)
 
 write:
 	delete(rfs.fids, r.Fid)
@@ -514,7 +513,7 @@ func (rfs *RamFS) WriteStat(r *protocol.WriteStatRequest) (*protocol.WriteStatRe
 }
 
 func main() {
-	root := tree.NewTree("/", 0777, "none")
+	root := tree.NewRAMTree("/", 0777, "none", "none")
 	l, err := net.Listen("tcp", ":8080")
 	if err != nil {
 		log.Fatalf("Unable to listen: %v", err)
