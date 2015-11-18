@@ -1,15 +1,13 @@
-package main
+package fileserver
 
 import (
 	"bytes"
 	"fmt"
 	"log"
-	"net"
 	"sync"
 
 	"github.com/joushou/g9p"
 	"github.com/joushou/g9p/protocol"
-	"github.com/joushou/g9ptools/examples/tree"
 )
 
 const (
@@ -18,7 +16,7 @@ const (
 
 type State struct {
 	sync.RWMutex
-	location tree.ElementSlice
+	location ElementSlice
 
 	open     bool
 	mode     protocol.OpenMode
@@ -26,21 +24,25 @@ type State struct {
 	username string
 }
 
-type RamFS struct {
+type FileServer struct {
 	sync.RWMutex
-	root    tree.Dir
-	maxsize uint32
-	fids    map[protocol.Fid]*State
+	Root    Dir
+	MaxSize uint32
+	Chatty  bool
+	Fids    map[protocol.Fid]*State
 }
 
-func (rfs *RamFS) Version(r *protocol.VersionRequest) (*protocol.VersionResponse, error) {
-	log.Printf("-> Version request")
-	rfs.RLock()
-	defer rfs.RUnlock()
+func (fs *FileServer) Version(r *protocol.VersionRequest) (*protocol.VersionResponse, error) {
+	if fs.Chatty {
+		log.Printf("-> Version request")
+	}
+
+	fs.RLock()
+	defer fs.RUnlock()
 	if r.MaxSize < DefaultMaxSize {
-		rfs.maxsize = r.MaxSize
+		fs.MaxSize = r.MaxSize
 	} else {
-		rfs.maxsize = DefaultMaxSize
+		fs.MaxSize = DefaultMaxSize
 	}
 
 	proto := "9P2000"
@@ -49,34 +51,38 @@ func (rfs *RamFS) Version(r *protocol.VersionRequest) (*protocol.VersionResponse
 	}
 
 	resp := &protocol.VersionResponse{
-		MaxSize: rfs.maxsize,
+		MaxSize: fs.MaxSize,
 		Version: proto,
 	}
 
 	return resp, nil
 }
 
-func (rfs *RamFS) Auth(*protocol.AuthRequest) (*protocol.AuthResponse, error) {
-	log.Printf("-> Auth request")
+func (fs *FileServer) Auth(*protocol.AuthRequest) (*protocol.AuthResponse, error) {
+	if fs.Chatty {
+		log.Printf("-> Auth request")
+	}
 	return nil, fmt.Errorf("auth not supported")
 }
 
-func (rfs *RamFS) Attach(r *protocol.AttachRequest) (*protocol.AttachResponse, error) {
-	log.Printf("-> Attach request")
-	rfs.Lock()
-	defer rfs.Unlock()
+func (fs *FileServer) Attach(r *protocol.AttachRequest) (*protocol.AttachResponse, error) {
+	if fs.Chatty {
+		log.Printf("-> Attach request: %s, %s", r.Username, r.Service)
+	}
+	fs.Lock()
+	defer fs.Unlock()
 
-	if _, ok := rfs.fids[r.Fid]; ok {
+	if _, ok := fs.Fids[r.Fid]; ok {
 		return nil, fmt.Errorf("fid already in use")
 	}
 
 	s := &State{
 		service:  r.Service,
 		username: r.Username,
-		location: tree.ElementSlice{rfs.root},
+		location: ElementSlice{fs.Root},
 	}
 
-	rfs.fids[r.Fid] = s
+	fs.Fids[r.Fid] = s
 
 	resp := &protocol.AttachResponse{
 		Qid: s.location.Last().Qid(),
@@ -85,17 +91,19 @@ func (rfs *RamFS) Attach(r *protocol.AttachRequest) (*protocol.AttachResponse, e
 	return resp, nil
 }
 
-func (rfs *RamFS) Flush(r *protocol.FlushRequest) (*protocol.FlushResponse, error) {
+func (fs *FileServer) Flush(r *protocol.FlushRequest) (*protocol.FlushResponse, error) {
 	// TODO(kl): Handle flush!
 	return nil, g9p.ErrFlushed
 }
 
-func (rfs *RamFS) Walk(r *protocol.WalkRequest) (*protocol.WalkResponse, error) {
-	log.Printf("-> Walk request")
-	rfs.Lock()
-	defer rfs.Unlock()
+func (fs *FileServer) Walk(r *protocol.WalkRequest) (*protocol.WalkResponse, error) {
+	if fs.Chatty {
+		log.Printf("-> Walk request: %v", r.Names)
+	}
+	fs.Lock()
+	defer fs.Unlock()
 
-	s, ok := rfs.fids[r.Fid]
+	s, ok := fs.Fids[r.Fid]
 	if !ok {
 		return nil, fmt.Errorf("no such fid")
 	}
@@ -103,7 +111,7 @@ func (rfs *RamFS) Walk(r *protocol.WalkRequest) (*protocol.WalkResponse, error) 
 	s.Lock()
 	defer s.Unlock()
 
-	if _, ok = rfs.fids[r.NewFid]; ok {
+	if _, ok = fs.Fids[r.NewFid]; ok {
 		return nil, fmt.Errorf("fid already in use")
 	}
 
@@ -113,13 +121,13 @@ func (rfs *RamFS) Walk(r *protocol.WalkRequest) (*protocol.WalkResponse, error) 
 			username: s.username,
 			location: s.location,
 		}
-		rfs.fids[r.NewFid] = x
+		fs.Fids[r.NewFid] = x
 
 		resp := &protocol.WalkResponse{}
 		return resp, nil
 	}
 
-	root, ok := s.location.Last().(tree.Dir)
+	root, ok := s.location.Last().(Dir)
 	if !ok {
 		return nil, fmt.Errorf("fid not dir")
 	}
@@ -139,7 +147,7 @@ func (rfs *RamFS) Walk(r *protocol.WalkRequest) (*protocol.WalkResponse, error) 
 			goto write
 		}
 
-		var d tree.Element
+		var d Element
 		var istree bool
 
 		addToLoc := true
@@ -149,7 +157,7 @@ func (rfs *RamFS) Walk(r *protocol.WalkRequest) (*protocol.WalkResponse, error) 
 			// This is a nop, but we should still report the result
 			d = root
 			addToLoc = false
-			_, istree = d.(tree.Dir)
+			_, istree = d.(Dir)
 		case "..":
 			// Go one directory up, or nop if we're at /
 			d = newloc.Parent()
@@ -157,13 +165,12 @@ func (rfs *RamFS) Walk(r *protocol.WalkRequest) (*protocol.WalkResponse, error) 
 				newloc = newloc[:len(newloc)-1]
 				addToLoc = false
 			}
-			_, istree = d.(tree.Dir)
+			_, istree = d.(Dir)
 		default:
 			// Try to find the file
 			d = root.Find(name)
-			_, istree = d.(tree.Dir)
+			_, istree = d.(Dir)
 			if d == nil {
-				log.Printf("find failed for %v", name)
 				goto write
 			}
 		}
@@ -179,13 +186,13 @@ func (rfs *RamFS) Walk(r *protocol.WalkRequest) (*protocol.WalkResponse, error) 
 				username: s.username,
 				location: newloc,
 			}
-			rfs.fids[r.NewFid] = s
+			fs.Fids[r.NewFid] = s
 		}
 		if !istree {
 			goto write
 		}
 
-		root = d.(tree.Dir)
+		root = d.(Dir)
 
 	}
 
@@ -197,12 +204,14 @@ write:
 	return resp, nil
 }
 
-func (rfs *RamFS) Open(r *protocol.OpenRequest) (*protocol.OpenResponse, error) {
-	log.Printf("-> Open request")
-	rfs.RLock()
-	defer rfs.RUnlock()
+func (fs *FileServer) Open(r *protocol.OpenRequest) (*protocol.OpenResponse, error) {
+	if fs.Chatty {
+		log.Printf("-> Open request")
+	}
+	fs.RLock()
+	defer fs.RUnlock()
 
-	s, ok := rfs.fids[r.Fid]
+	s, ok := fs.Fids[r.Fid]
 	if !ok {
 		return nil, fmt.Errorf("no such fid")
 	}
@@ -228,12 +237,14 @@ func (rfs *RamFS) Open(r *protocol.OpenRequest) (*protocol.OpenResponse, error) 
 
 }
 
-func (rfs *RamFS) Create(r *protocol.CreateRequest) (*protocol.CreateResponse, error) {
-	log.Printf("-> Create request")
-	rfs.RLock()
-	defer rfs.RUnlock()
+func (fs *FileServer) Create(r *protocol.CreateRequest) (*protocol.CreateResponse, error) {
+	if fs.Chatty {
+		log.Printf("-> Create request")
+	}
+	fs.RLock()
+	defer fs.RUnlock()
 
-	s, ok := rfs.fids[r.Fid]
+	s, ok := fs.Fids[r.Fid]
 	if !ok {
 		return nil, fmt.Errorf("no such fid")
 	}
@@ -249,7 +260,7 @@ func (rfs *RamFS) Create(r *protocol.CreateRequest) (*protocol.CreateResponse, e
 		return nil, fmt.Errorf("illegal name")
 	}
 
-	t, ok := s.location.Last().(tree.Dir)
+	t, ok := s.location.Last().(Dir)
 	if !ok {
 		return nil, fmt.Errorf("not a directory")
 	}
@@ -285,12 +296,14 @@ func (rfs *RamFS) Create(r *protocol.CreateRequest) (*protocol.CreateResponse, e
 	return resp, nil
 }
 
-func (rfs *RamFS) Read(r *protocol.ReadRequest) (*protocol.ReadResponse, error) {
-	log.Printf("-> Read request")
-	rfs.RLock()
-	defer rfs.RUnlock()
+func (fs *FileServer) Read(r *protocol.ReadRequest) (*protocol.ReadResponse, error) {
+	if fs.Chatty {
+		log.Printf("-> Read request")
+	}
+	fs.RLock()
+	defer fs.RUnlock()
 
-	s, ok := rfs.fids[r.Fid]
+	s, ok := fs.Fids[r.Fid]
 	if !ok {
 		return nil, fmt.Errorf("no such fid")
 	}
@@ -309,14 +322,16 @@ func (rfs *RamFS) Read(r *protocol.ReadRequest) (*protocol.ReadResponse, error) 
 	var data []byte
 
 	switch x := s.location.Last().(type) {
-	case tree.Dir:
+	case Dir:
 		buf := new(bytes.Buffer)
-		x.Walk(func(e tree.Element) {
+		x.RLock()
+		defer x.RUnlock()
+		x.Walk(func(e Element) {
 			y := e.Stat()
 			y.Encode(buf)
 		})
 		data = buf.Bytes()
-	case tree.File:
+	case File:
 		x.RLock()
 		defer x.RUnlock()
 		data = x.Content()
@@ -341,20 +356,22 @@ write:
 	}
 
 	// Ensure that we obey the negotiated maxsize!
-	if resp.EncodedLength()+protocol.HeaderSize > int(rfs.maxsize) {
-		diff := r.EncodedLength() + protocol.HeaderSize - int(rfs.maxsize)
+	if resp.EncodedLength()+protocol.HeaderSize > int(fs.MaxSize) {
+		diff := r.EncodedLength() + protocol.HeaderSize - int(fs.MaxSize)
 		resp.Data = resp.Data[:len(resp.Data)-diff]
 	}
 
 	return resp, nil
 }
 
-func (rfs *RamFS) Write(r *protocol.WriteRequest) (*protocol.WriteResponse, error) {
-	log.Printf("-> Write request")
-	rfs.RLock()
-	defer rfs.RUnlock()
+func (fs *FileServer) Write(r *protocol.WriteRequest) (*protocol.WriteResponse, error) {
+	if fs.Chatty {
+		log.Printf("-> Write request")
+	}
+	fs.RLock()
+	defer fs.RUnlock()
 
-	s, ok := rfs.fids[r.Fid]
+	s, ok := fs.Fids[r.Fid]
 	if !ok {
 		return nil, fmt.Errorf("no such fid")
 	}
@@ -371,9 +388,9 @@ func (rfs *RamFS) Write(r *protocol.WriteRequest) (*protocol.WriteResponse, erro
 	}
 
 	switch x := s.location.Last().(type) {
-	case tree.Dir:
+	case Dir:
 		return nil, fmt.Errorf("cannot write to directory")
-	case tree.File:
+	case File:
 		x.Lock()
 		defer x.Unlock()
 		c := x.Content()
@@ -403,11 +420,13 @@ func (rfs *RamFS) Write(r *protocol.WriteRequest) (*protocol.WriteResponse, erro
 	return nil, fmt.Errorf("unexpected error")
 }
 
-func (rfs *RamFS) Clunk(r *protocol.ClunkRequest) (*protocol.ClunkResponse, error) {
-	log.Printf("-> Clunk request")
-	rfs.Lock()
-	defer rfs.Unlock()
-	s, ok := rfs.fids[r.Fid]
+func (fs *FileServer) Clunk(r *protocol.ClunkRequest) (*protocol.ClunkResponse, error) {
+	if fs.Chatty {
+		log.Printf("-> Clunk request")
+	}
+	fs.Lock()
+	defer fs.Unlock()
+	s, ok := fs.Fids[r.Fid]
 	if !ok {
 		return nil, fmt.Errorf("no such fid")
 	}
@@ -415,23 +434,25 @@ func (rfs *RamFS) Clunk(r *protocol.ClunkRequest) (*protocol.ClunkResponse, erro
 	s.Lock()
 	defer s.Unlock()
 
-	delete(rfs.fids, r.Fid)
+	delete(fs.Fids, r.Fid)
 	return &protocol.ClunkResponse{}, nil
 }
 
-func (rfs *RamFS) Remove(r *protocol.RemoveRequest) (*protocol.RemoveResponse, error) {
-	log.Printf("-> Remove request")
-	rfs.Lock()
-	defer rfs.Unlock()
+func (fs *FileServer) Remove(r *protocol.RemoveRequest) (*protocol.RemoveResponse, error) {
+	if fs.Chatty {
+		log.Printf("-> Remove request")
+	}
+	fs.Lock()
+	defer fs.Unlock()
 
-	s, ok := rfs.fids[r.Fid]
+	s, ok := fs.Fids[r.Fid]
 	if !ok {
 		return nil, fmt.Errorf("no such fid")
 	}
 	s.Lock()
 	defer s.Unlock()
 
-	var l, p tree.Element
+	var l, p Element
 
 	// We're not going to remove /.
 	if len(s.location) <= 1 {
@@ -441,7 +462,7 @@ func (rfs *RamFS) Remove(r *protocol.RemoveRequest) (*protocol.RemoveResponse, e
 	// Attempt to delete it.
 	l = s.location.Last()
 
-	if x, ok := l.(tree.Dir); ok {
+	if x, ok := l.(Dir); ok {
 		if !x.Empty() {
 			goto write
 		}
@@ -451,19 +472,21 @@ func (rfs *RamFS) Remove(r *protocol.RemoveRequest) (*protocol.RemoveResponse, e
 	if err := p.Open(s.username, protocol.OWRITE); err != nil {
 		goto write
 	}
-	p.(tree.Dir).Remove(l)
+	p.(Dir).Remove(l)
 
 write:
-	delete(rfs.fids, r.Fid)
+	delete(fs.Fids, r.Fid)
 	return &protocol.RemoveResponse{}, nil
 }
 
-func (rfs *RamFS) Stat(r *protocol.StatRequest) (*protocol.StatResponse, error) {
-	log.Printf("-> Stat request")
-	rfs.RLock()
-	defer rfs.RUnlock()
+func (fs *FileServer) Stat(r *protocol.StatRequest) (*protocol.StatResponse, error) {
+	if fs.Chatty {
+		log.Printf("-> Stat request")
+	}
+	fs.RLock()
+	defer fs.RUnlock()
 
-	s, ok := rfs.fids[r.Fid]
+	s, ok := fs.Fids[r.Fid]
 	if !ok {
 		return nil, fmt.Errorf("no such fid")
 	}
@@ -483,12 +506,14 @@ func (rfs *RamFS) Stat(r *protocol.StatRequest) (*protocol.StatResponse, error) 
 	return resp, nil
 }
 
-func (rfs *RamFS) WriteStat(r *protocol.WriteStatRequest) (*protocol.WriteStatResponse, error) {
-	log.Printf("-> WriteStat request")
-	rfs.Lock()
-	defer rfs.Unlock()
+func (fs *FileServer) WriteStat(r *protocol.WriteStatRequest) (*protocol.WriteStatResponse, error) {
+	if fs.Chatty {
+		log.Printf("-> WriteStat request")
+	}
+	fs.Lock()
+	defer fs.Unlock()
 
-	s, ok := rfs.fids[r.Fid]
+	s, ok := fs.Fids[r.Fid]
 	if !ok {
 		return nil, fmt.Errorf("no such fid")
 	}
@@ -496,7 +521,7 @@ func (rfs *RamFS) WriteStat(r *protocol.WriteStatRequest) (*protocol.WriteStatRe
 	s.Lock()
 	defer s.Unlock()
 
-	var l, p tree.Element
+	var l, p Element
 	l = s.location.Last()
 	if l == nil {
 		return nil, fmt.Errorf("no such file")
@@ -505,28 +530,18 @@ func (rfs *RamFS) WriteStat(r *protocol.WriteStatRequest) (*protocol.WriteStatRe
 	if len(s.location) > 1 {
 		p = s.location.Parent()
 	}
-	if err := tree.SetStat(s.username, l, p, r.Stat); err != nil {
+	if err := setStat(s.username, l, p, r.Stat); err != nil {
 		return nil, err
 	}
 
 	return &protocol.WriteStatResponse{}, nil
 }
 
-func main() {
-	root := tree.NewRAMTree("/", 0777, "none", "none")
-	l, err := net.Listen("tcp", ":8080")
-	if err != nil {
-		log.Fatalf("Unable to listen: %v", err)
+func NewFileServer(root Dir, maxSize uint32, chatty bool) *FileServer {
+	return &FileServer{
+		Root:    root,
+		MaxSize: maxSize,
+		Chatty:  chatty,
+		Fids:    make(map[protocol.Fid]*State),
 	}
-
-	h := func() g9p.Handler {
-		rfs := &RamFS{
-			root:    root,
-			maxsize: 1024 * 1024 * 1024,
-			fids:    make(map[protocol.Fid]*State),
-		}
-		return rfs
-	}
-
-	g9p.ServeListener(l, h)
 }
