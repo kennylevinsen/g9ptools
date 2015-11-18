@@ -30,9 +30,53 @@ type FileServer struct {
 	MaxSize uint32
 	Chatty  bool
 	Fids    map[protocol.Fid]*State
+	tagLock sync.Mutex
+	tags    map[protocol.Tag]bool
 }
 
-func (fs *FileServer) Version(r *protocol.VersionRequest) (*protocol.VersionResponse, error) {
+func (fs *FileServer) register(d protocol.Message) error {
+	fs.tagLock.Lock()
+	defer fs.tagLock.Unlock()
+
+	t := d.GetTag()
+	if _, ok := fs.tags[t]; ok {
+		return fmt.Errorf("tag already in use")
+	}
+
+	fs.tags[t] = true
+	return nil
+}
+
+func (fs *FileServer) flush(t protocol.Tag) {
+	fs.tagLock.Lock()
+	defer fs.tagLock.Unlock()
+
+	if _, ok := fs.tags[t]; ok {
+		delete(fs.tags, t)
+	}
+}
+
+func (fs *FileServer) flushed(d protocol.Message) bool {
+	fs.tagLock.Lock()
+	defer fs.tagLock.Unlock()
+
+	t := d.GetTag()
+	if _, ok := fs.tags[t]; ok {
+		delete(fs.tags, t)
+		return false
+	}
+	return true
+}
+
+func (fs *FileServer) Version(r *protocol.VersionRequest) (resp *protocol.VersionResponse, err error) {
+	fs.register(r)
+	defer func() {
+		if fs.flushed(r) {
+			resp = nil
+			err = g9p.ErrFlushed
+		}
+	}()
+
 	if fs.Chatty {
 		log.Printf("-> Version request")
 	}
@@ -50,7 +94,7 @@ func (fs *FileServer) Version(r *protocol.VersionRequest) (*protocol.VersionResp
 		proto = "unknown"
 	}
 
-	resp := &protocol.VersionResponse{
+	resp = &protocol.VersionResponse{
 		MaxSize: fs.MaxSize,
 		Version: proto,
 	}
@@ -58,14 +102,31 @@ func (fs *FileServer) Version(r *protocol.VersionRequest) (*protocol.VersionResp
 	return resp, nil
 }
 
-func (fs *FileServer) Auth(*protocol.AuthRequest) (*protocol.AuthResponse, error) {
+func (fs *FileServer) Auth(r *protocol.AuthRequest) (resp *protocol.AuthResponse, err error) {
+	fs.register(r)
+	defer func() {
+		if fs.flushed(r) {
+			resp = nil
+			err = g9p.ErrFlushed
+		}
+	}()
+
 	if fs.Chatty {
 		log.Printf("-> Auth request")
 	}
+
 	return nil, fmt.Errorf("auth not supported")
 }
 
-func (fs *FileServer) Attach(r *protocol.AttachRequest) (*protocol.AttachResponse, error) {
+func (fs *FileServer) Attach(r *protocol.AttachRequest) (resp *protocol.AttachResponse, err error) {
+	fs.register(r)
+	defer func() {
+		if fs.flushed(r) {
+			resp = nil
+			err = g9p.ErrFlushed
+		}
+	}()
+
 	if fs.Chatty {
 		log.Printf("-> Attach request: %s, %s", r.Username, r.Service)
 	}
@@ -84,19 +145,42 @@ func (fs *FileServer) Attach(r *protocol.AttachRequest) (*protocol.AttachRespons
 
 	fs.Fids[r.Fid] = s
 
-	resp := &protocol.AttachResponse{
+	resp = &protocol.AttachResponse{
 		Qid: s.location.Last().Qid(),
 	}
 
 	return resp, nil
 }
 
-func (fs *FileServer) Flush(r *protocol.FlushRequest) (*protocol.FlushResponse, error) {
-	// TODO(kl): Handle flush!
-	return nil, g9p.ErrFlushed
+func (fs *FileServer) Flush(r *protocol.FlushRequest) (resp *protocol.FlushResponse, err error) {
+	fs.register(r)
+	defer func() {
+		if fs.flushed(r) {
+			resp = nil
+			err = g9p.ErrFlushed
+		}
+	}()
+
+	if fs.Chatty {
+		log.Printf("-> Flush request: %d", r.OldTag)
+	}
+
+	fs.flush(r.OldTag)
+
+	resp = &protocol.FlushResponse{}
+
+	return resp, nil
 }
 
-func (fs *FileServer) Walk(r *protocol.WalkRequest) (*protocol.WalkResponse, error) {
+func (fs *FileServer) Walk(r *protocol.WalkRequest) (resp *protocol.WalkResponse, err error) {
+	fs.register(r)
+	defer func() {
+		if fs.flushed(r) {
+			resp = nil
+			err = g9p.ErrFlushed
+		}
+	}()
+
 	if fs.Chatty {
 		log.Printf("-> Walk request: %v", r.Names)
 	}
@@ -197,14 +281,22 @@ func (fs *FileServer) Walk(r *protocol.WalkRequest) (*protocol.WalkResponse, err
 	}
 
 write:
-	resp := &protocol.WalkResponse{
+	resp = &protocol.WalkResponse{
 		Qids: qids,
 	}
 
 	return resp, nil
 }
 
-func (fs *FileServer) Open(r *protocol.OpenRequest) (*protocol.OpenResponse, error) {
+func (fs *FileServer) Open(r *protocol.OpenRequest) (resp *protocol.OpenResponse, err error) {
+	fs.register(r)
+	defer func() {
+		if fs.flushed(r) {
+			resp = nil
+			err = g9p.ErrFlushed
+		}
+	}()
+
 	if fs.Chatty {
 		log.Printf("-> Open request")
 	}
@@ -229,7 +321,7 @@ func (fs *FileServer) Open(r *protocol.OpenRequest) (*protocol.OpenResponse, err
 	}
 	s.open = true
 	s.mode = r.Mode
-	resp := &protocol.OpenResponse{
+	resp = &protocol.OpenResponse{
 		Qid: l.Qid(),
 	}
 
@@ -237,9 +329,17 @@ func (fs *FileServer) Open(r *protocol.OpenRequest) (*protocol.OpenResponse, err
 
 }
 
-func (fs *FileServer) Create(r *protocol.CreateRequest) (*protocol.CreateResponse, error) {
+func (fs *FileServer) Create(r *protocol.CreateRequest) (resp *protocol.CreateResponse, err error) {
+	fs.register(r)
+	defer func() {
+		if fs.flushed(r) {
+			resp = nil
+			err = g9p.ErrFlushed
+		}
+	}()
+
 	if fs.Chatty {
-		log.Printf("-> Create request")
+		log.Printf("-> Create request: %v", r.Name)
 	}
 	fs.RLock()
 	defer fs.RUnlock()
@@ -289,14 +389,22 @@ func (fs *FileServer) Create(r *protocol.CreateRequest) (*protocol.CreateRespons
 
 	s.open = true
 	s.mode = r.Mode
-	resp := &protocol.CreateResponse{
+	resp = &protocol.CreateResponse{
 		Qid: l.Qid(),
 	}
 
 	return resp, nil
 }
 
-func (fs *FileServer) Read(r *protocol.ReadRequest) (*protocol.ReadResponse, error) {
+func (fs *FileServer) Read(r *protocol.ReadRequest) (resp *protocol.ReadResponse, err error) {
+	fs.register(r)
+	defer func() {
+		if fs.flushed(r) {
+			resp = nil
+			err = g9p.ErrFlushed
+		}
+	}()
+
 	if fs.Chatty {
 		log.Printf("-> Read request")
 	}
@@ -351,7 +459,7 @@ func (fs *FileServer) Read(r *protocol.ReadRequest) (*protocol.ReadResponse, err
 
 	data = data[r.Offset : r.Offset+max]
 write:
-	resp := &protocol.ReadResponse{
+	resp = &protocol.ReadResponse{
 		Data: data,
 	}
 
@@ -364,7 +472,15 @@ write:
 	return resp, nil
 }
 
-func (fs *FileServer) Write(r *protocol.WriteRequest) (*protocol.WriteResponse, error) {
+func (fs *FileServer) Write(r *protocol.WriteRequest) (resp *protocol.WriteResponse, err error) {
+	fs.register(r)
+	defer func() {
+		if fs.flushed(r) {
+			resp = nil
+			err = g9p.ErrFlushed
+		}
+	}()
+
 	if fs.Chatty {
 		log.Printf("-> Write request")
 	}
@@ -410,7 +526,7 @@ func (fs *FileServer) Write(r *protocol.WriteRequest) (*protocol.WriteResponse, 
 
 		copy(c[offset:], r.Data)
 
-		resp := &protocol.WriteResponse{
+		resp = &protocol.WriteResponse{
 			Count: uint32(len(r.Data)),
 		}
 
@@ -420,7 +536,15 @@ func (fs *FileServer) Write(r *protocol.WriteRequest) (*protocol.WriteResponse, 
 	return nil, fmt.Errorf("unexpected error")
 }
 
-func (fs *FileServer) Clunk(r *protocol.ClunkRequest) (*protocol.ClunkResponse, error) {
+func (fs *FileServer) Clunk(r *protocol.ClunkRequest) (resp *protocol.ClunkResponse, err error) {
+	fs.register(r)
+	defer func() {
+		if fs.flushed(r) {
+			resp = nil
+			err = g9p.ErrFlushed
+		}
+	}()
+
 	if fs.Chatty {
 		log.Printf("-> Clunk request")
 	}
@@ -438,7 +562,15 @@ func (fs *FileServer) Clunk(r *protocol.ClunkRequest) (*protocol.ClunkResponse, 
 	return &protocol.ClunkResponse{}, nil
 }
 
-func (fs *FileServer) Remove(r *protocol.RemoveRequest) (*protocol.RemoveResponse, error) {
+func (fs *FileServer) Remove(r *protocol.RemoveRequest) (resp *protocol.RemoveResponse, err error) {
+	fs.register(r)
+	defer func() {
+		if fs.flushed(r) {
+			resp = nil
+			err = g9p.ErrFlushed
+		}
+	}()
+
 	if fs.Chatty {
 		log.Printf("-> Remove request")
 	}
@@ -479,7 +611,15 @@ write:
 	return &protocol.RemoveResponse{}, nil
 }
 
-func (fs *FileServer) Stat(r *protocol.StatRequest) (*protocol.StatResponse, error) {
+func (fs *FileServer) Stat(r *protocol.StatRequest) (resp *protocol.StatResponse, err error) {
+	fs.register(r)
+	defer func() {
+		if fs.flushed(r) {
+			resp = nil
+			err = g9p.ErrFlushed
+		}
+	}()
+
 	if fs.Chatty {
 		log.Printf("-> Stat request")
 	}
@@ -499,14 +639,22 @@ func (fs *FileServer) Stat(r *protocol.StatRequest) (*protocol.StatResponse, err
 		return nil, fmt.Errorf("no such file")
 	}
 
-	resp := &protocol.StatResponse{
+	resp = &protocol.StatResponse{
 		Stat: l.Stat(),
 	}
 
 	return resp, nil
 }
 
-func (fs *FileServer) WriteStat(r *protocol.WriteStatRequest) (*protocol.WriteStatResponse, error) {
+func (fs *FileServer) WriteStat(r *protocol.WriteStatRequest) (resp *protocol.WriteStatResponse, err error) {
+	fs.register(r)
+	defer func() {
+		if fs.flushed(r) {
+			resp = nil
+			err = g9p.ErrFlushed
+		}
+	}()
+
 	if fs.Chatty {
 		log.Printf("-> WriteStat request")
 	}
@@ -543,5 +691,6 @@ func NewFileServer(root Dir, maxSize uint32, chatty bool) *FileServer {
 		MaxSize: maxSize,
 		Chatty:  chatty,
 		Fids:    make(map[protocol.Fid]*State),
+		tags:    make(map[protocol.Tag]bool),
 	}
 }
