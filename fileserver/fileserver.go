@@ -77,6 +77,9 @@ func (fs *FileServer) Version(r *protocol.VersionRequest) (resp *protocol.Versio
 			resp = nil
 			err = g9p.ErrFlushed
 		}
+		if fs.Chatty {
+			log.Printf("<- Version response")
+		}
 	}()
 
 	if fs.Chatty {
@@ -126,6 +129,9 @@ func (fs *FileServer) Attach(r *protocol.AttachRequest) (resp *protocol.AttachRe
 		if fs.flushed(r) {
 			resp = nil
 			err = g9p.ErrFlushed
+		}
+		if fs.Chatty {
+			log.Printf("<- Attach response")
 		}
 	}()
 
@@ -177,6 +183,9 @@ func (fs *FileServer) Flush(r *protocol.FlushRequest) (resp *protocol.FlushRespo
 			resp = nil
 			err = g9p.ErrFlushed
 		}
+		if fs.Chatty {
+			log.Printf("<- Flush response")
+		}
 	}()
 
 	if fs.Chatty {
@@ -196,6 +205,9 @@ func (fs *FileServer) Walk(r *protocol.WalkRequest) (resp *protocol.WalkResponse
 		if fs.flushed(r) {
 			resp = nil
 			err = g9p.ErrFlushed
+		}
+		if fs.Chatty {
+			log.Printf("<- Walk response")
 		}
 	}()
 
@@ -241,68 +253,54 @@ func (fs *FileServer) Walk(r *protocol.WalkRequest) (resp *protocol.WalkResponse
 	if !d {
 		return nil, fmt.Errorf("fid not dir")
 	}
-	root := cur.(Dir)
+	root := cur
 
 	newloc := s.location
 
 	var qids []protocol.Qid
 	for i := range r.Names {
-		// This can cause multiple RLock's being held on the same tree, but that
-		// doesn't matter, and they should all be unlocked at the end by the
-		// defer.
-		root.RLock()
-		defer root.RUnlock()
-
 		x, err := root.Open(s.username, protocol.OEXEC)
 		if err != nil {
 			goto write
 		}
 		x.Close()
 
-		var d File
-		var istree bool
-
 		addToLoc := true
 		name := r.Names[i]
 		switch name {
 		case ".":
 			// This is a nop, but we should still report the result
-			d = root
 			addToLoc = false
-			istree, err = d.IsDir()
-			if err != nil {
-				return nil, err
-			}
 		case "..":
 			// Go one directory up, or nop if we're at /
-			d = newloc.Parent()
+			root = newloc.Parent()
 			if len(newloc) > 1 {
 				newloc = newloc[:len(newloc)-1]
 				addToLoc = false
 			}
-			istree, err = d.IsDir()
-			if err != nil {
-				return nil, err
-			}
 		default:
-			// Try to find the file
-			d, err = root.Find(name)
+			istree, err := root.IsDir()
 			if err != nil {
 				return nil, err
 			}
-			if d == nil {
+			if !istree {
 				goto write
 			}
-			istree, err = d.IsDir()
+
+			d := root.(Dir)
+			root, err = d.Walk(s.username, name)
 			if err != nil {
-				return nil, err
+				goto write
+			}
+			if root == nil {
+				goto write
 			}
 		}
 
 		if addToLoc {
-			newloc = append(newloc, d)
+			newloc = append(newloc, root)
 		}
-		q, err := d.Qid()
+		q, err := root.Qid()
 		if err != nil {
 			return nil, err
 		}
@@ -316,12 +314,6 @@ func (fs *FileServer) Walk(r *protocol.WalkRequest) (resp *protocol.WalkResponse
 			}
 			fs.Fids[r.NewFid] = s
 		}
-		if !istree {
-			goto write
-		}
-
-		root = d.(Dir)
-
 	}
 
 write:
@@ -338,6 +330,9 @@ func (fs *FileServer) Open(r *protocol.OpenRequest) (resp *protocol.OpenResponse
 		if fs.flushed(r) {
 			resp = nil
 			err = g9p.ErrFlushed
+		}
+		if fs.Chatty {
+			log.Printf("<- Open response")
 		}
 	}()
 
@@ -381,9 +376,13 @@ func (fs *FileServer) Open(r *protocol.OpenRequest) (resp *protocol.OpenResponse
 func (fs *FileServer) Create(r *protocol.CreateRequest) (resp *protocol.CreateResponse, err error) {
 	fs.register(r)
 	defer func() {
+		log.Printf("<- Create response: %v", resp)
 		if fs.flushed(r) {
 			resp = nil
 			err = g9p.ErrFlushed
+		}
+		if fs.Chatty {
+			log.Printf("<- Create response")
 		}
 	}()
 
@@ -419,24 +418,7 @@ func (fs *FileServer) Create(r *protocol.CreateRequest) (resp *protocol.CreateRe
 	}
 	t := cur.(Dir)
 
-	t.Lock()
-	defer t.Unlock()
-
-	d, err := t.Find(r.Name)
-	if err != nil {
-		return nil, err
-	}
-	if d != nil {
-		return nil, fmt.Errorf("file already exists")
-	}
-
-	x, err := t.Open(s.username, protocol.OWRITE)
-	if err != nil {
-		return nil, fmt.Errorf("could not open directory for writing")
-	}
-	x.Close()
-
-	l, err := t.Create(r.Name, r.Permissions)
+	l, err := t.Create(s.username, r.Name, r.Permissions)
 	if err != nil {
 		return nil, err
 	}
@@ -446,7 +428,7 @@ func (fs *FileServer) Create(r *protocol.CreateRequest) (resp *protocol.CreateRe
 		return nil, err
 	}
 
-	x, err = l.Open(s.username, r.Mode)
+	x, err := l.Open(s.username, r.Mode)
 	if err != nil {
 		return nil, err
 	}
@@ -467,6 +449,9 @@ func (fs *FileServer) Read(r *protocol.ReadRequest) (resp *protocol.ReadResponse
 		if fs.flushed(r) {
 			resp = nil
 			err = g9p.ErrFlushed
+		}
+		if fs.Chatty {
+			log.Printf("<- Read response")
 		}
 	}()
 
@@ -523,6 +508,9 @@ func (fs *FileServer) Write(r *protocol.WriteRequest) (resp *protocol.WriteRespo
 			resp = nil
 			err = g9p.ErrFlushed
 		}
+		if fs.Chatty {
+			log.Printf("<- Write response")
+		}
 	}()
 
 	if fs.Chatty {
@@ -570,6 +558,9 @@ func (fs *FileServer) Clunk(r *protocol.ClunkRequest) (resp *protocol.ClunkRespo
 			resp = nil
 			err = g9p.ErrFlushed
 		}
+		if fs.Chatty {
+			log.Printf("<- Clunk response")
+		}
 	}()
 
 	if fs.Chatty {
@@ -602,6 +593,9 @@ func (fs *FileServer) Remove(r *protocol.RemoveRequest) (resp *protocol.RemoveRe
 			resp = nil
 			err = g9p.ErrFlushed
 		}
+		if fs.Chatty {
+			log.Printf("<- Remove response")
+		}
 	}()
 
 	if fs.Chatty {
@@ -630,27 +624,10 @@ func (fs *FileServer) Remove(r *protocol.RemoveRequest) (resp *protocol.RemoveRe
 		return &protocol.RemoveResponse{}, nil
 	}
 
-	// Attempt to delete it.
+	// Attempt to delete it, but ignore error.
 	cur = s.location.Current()
-
-	isdir, err := cur.IsDir()
-	if isdir {
-		e, err := cur.(Dir).Empty()
-		if err != nil {
-			return nil, err
-		}
-		if !e {
-			return &protocol.RemoveResponse{}, nil
-		}
-	}
-
 	p = s.location.Parent()
-	x, err := p.Open(s.username, protocol.OWRITE)
-	if err != nil {
-		return &protocol.RemoveResponse{}, nil
-	}
-	x.Close()
-	p.(Dir).Remove(cur)
+	p.(Dir).Remove(s.username, cur)
 
 	return &protocol.RemoveResponse{}, nil
 }
@@ -661,6 +638,9 @@ func (fs *FileServer) Stat(r *protocol.StatRequest) (resp *protocol.StatResponse
 		if fs.flushed(r) {
 			resp = nil
 			err = g9p.ErrFlushed
+		}
+		if fs.Chatty {
+			log.Printf("<- Stat response")
 		}
 	}()
 

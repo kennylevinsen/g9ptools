@@ -6,34 +6,27 @@ import (
 	"github.com/joushou/g9p/protocol"
 )
 
-type locker interface {
-	RLock()
-	RUnlock()
-	Lock()
-	Unlock()
-}
-
 type File interface {
-	locker
+	Name() (string, error)
 
 	Open(user string, mode protocol.OpenMode) (OpenFile, error)
-	Name() (string, error)
+
+	Qid() (protocol.Qid, error)
 	Stat() (protocol.Stat, error)
 	WriteStat(protocol.Stat) error
-	Qid() (protocol.Qid, error)
+
 	IsDir() (bool, error)
+
+	Parent() (File, error)
 }
 
 type Dir interface {
 	File
 
-	Find(name string) (File, error)
-	Walk(func(File)) error
-	Empty() (bool, error)
-
-	Add(File) error
-	Create(name string, perms protocol.FileMode) (File, error)
-	Remove(File) error
+	Rename(user, oldname, newname string) error
+	Walk(user, name string) (File, error)
+	Create(user, name string, perms protocol.FileMode) (File, error)
+	Remove(user string, file File) error
 }
 
 type OpenFile interface {
@@ -99,7 +92,7 @@ func setStat(user string, e File, parent File, nstat protocol.Stat) error {
 	if nstat.Name != "" && nstat.Name != ostat.Name {
 		if parent != nil {
 			parent := parent.(Dir)
-			taken, err := parent.Find(nstat.Name)
+			taken, err := parent.Walk(user, nstat.Name)
 			if err != nil {
 				return err
 			}
