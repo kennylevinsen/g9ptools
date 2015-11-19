@@ -77,7 +77,5 @@ func main() {
 			fmt.Printf("cmd failed: %v\n", err)
 			return
 		}
-	case "testflush":
-		c.TestFlush()
 	}
 }
