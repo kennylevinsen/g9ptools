@@ -31,6 +31,7 @@ type Dir interface {
 	Walk(func(File)) error
 	Empty() (bool, error)
 
+	Add(File) error
 	Create(name string, perms protocol.FileMode) (File, error)
 	Remove(File) error
 }

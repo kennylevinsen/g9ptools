@@ -212,6 +212,14 @@ func (t *RAMTree) Create(name string, perms protocol.FileMode) (fileserver.File,
 	return d, nil
 }
 
+func (t *RAMTree) Add(f fileserver.File) error {
+	t.tree = append(t.tree, f)
+	t.mtime = time.Now()
+	t.atime = t.mtime
+	t.version++
+	return nil
+}
+
 func (t *RAMTree) Remove(other fileserver.File) error {
 	for i := range t.tree {
 		if t.tree[i] == other {
