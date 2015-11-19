@@ -30,7 +30,9 @@ func main() {
 	}
 
 	h := func() g9p.Handler {
-		return fileserver.NewFileServer(root, 10*1024*1024, true)
+		m := make(map[string]fileserver.Dir)
+		m["ramfs"] = root
+		return fileserver.NewFileServer(nil, m, 10*1024*1024, true)
 	}
 
 	log.Printf("Starting ramfs at %s", addr)

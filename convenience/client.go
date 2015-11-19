@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/joushou/g9p"
 	"github.com/joushou/g9p/protocol"
@@ -307,6 +309,44 @@ func (c *Client) Remove(name string) error {
 	if err != nil {
 		return err
 	}
+
+	return nil
+}
+
+type asdf struct {
+	resp protocol.Message
+	err  error
+}
+
+func (c *Client) TestFlush() error {
+	t := c.c.NextTag()
+	wreq := &protocol.WalkRequest{
+		Tag:    t,
+		Fid:    c.root,
+		NewFid: c.getFid(),
+		Names:  []string{"test", "wee", "hello", "thereyougo"},
+	}
+
+	freq := &protocol.FlushRequest{
+		Tag:    c.c.NextTag(),
+		OldTag: t,
+	}
+
+	ch := make(chan asdf)
+
+	go func() {
+		log.Printf("Flushing")
+		time.Sleep(1 * time.Millisecond)
+		resp, err := c.c.Flush(freq)
+		ch <- asdf{resp, err}
+	}()
+
+	log.Printf("Walking")
+	resp, err := c.c.Walk(wreq)
+
+	x := <-ch
+	log.Printf("Orig req: %v, %v", resp, err)
+	log.Printf("Flush req: %v, %v", x.resp, x.err)
 
 	return nil
 }

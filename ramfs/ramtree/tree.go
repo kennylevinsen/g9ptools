@@ -206,6 +206,60 @@ func NewRAMTree(name string, permissions protocol.FileMode, user, group string) 
 	}
 }
 
+type RAMOpenFile struct {
+	offset int
+	f      *RAMFile
+}
+
+func (of *RAMOpenFile) Seek(offset uint64) error {
+	if of.f == nil {
+		return errors.New("file not open")
+	}
+	of.f.RLock()
+	defer of.f.RUnlock()
+	if offset > len(f.content) {
+		return errors.New("seek past length")
+	}
+	of.offset = int(offset)
+}
+
+func (of *RAMOpenFile) Read(p []byte) (int, error) {
+	if of.f == nil {
+		return errors.New("file not open")
+	}
+	of.f.RLock()
+	defer of.f.RUnlock()
+	maxRead := len(p)
+	if maxRead > len(f.content)-of.offset {
+		maxRead = len(f.content) - of.offset
+	}
+
+	copy(p, f.content[offset:maxRead+offset])
+	of.offset += maxRead
+	return maxRead, nil
+}
+
+func (of *RAMOpenFile) Write(p []byte) (int, error) {
+	if of.f == nil {
+		return errors.New("file not open")
+	}
+
+	// TODO(kl): handle append-only
+	wlen := len(p)
+	if wlen+of.offset > len(f.content) {
+		b := make([]byte, wlen+of.offset)
+		copy(b, f.content[:of.offset])
+	}
+
+	copy(b[of.offset], p)
+	return wlen, nil
+}
+
+func (of *RAMOpenClose) Close() error {
+	of.f = nil
+	return nil
+}
+
 type RAMFile struct {
 	sync.RWMutex
 	content     []byte

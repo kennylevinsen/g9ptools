@@ -13,6 +13,36 @@ type locker interface {
 	Unlock()
 }
 
+/*
+type File interface {
+	locker
+
+	Open(user string, mode protocol.FileMode) (OpenFile, error)
+	Stat() (protocol.Stat, error)
+	WriteStat(protocol.Stat) error
+	Qid() (protocol.Qid, error)
+	IsDir() (bool, error)
+}
+
+type Dir interface {
+	File
+
+	Find(name string) (protocol.File, error)
+	Walk(func(File)) error
+	Empty() (bool, error)
+
+	Create(name string, perms protocol.FileMode) (File, error)
+	Remove(File) error
+}
+
+type OpenFile interface {
+	Seek(offset uint64) error
+	Read(p []byte) (int, error)
+	Write(p []byte) (int, error)
+	Close() error
+}
+*/
+
 type Element interface {
 	locker
 

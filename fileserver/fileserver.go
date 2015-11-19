@@ -26,9 +26,12 @@ type State struct {
 
 type FileServer struct {
 	sync.RWMutex
-	Root    Dir
+	Roots  map[string]Dir
+	Root   Dir
+	Chatty bool
+
 	MaxSize uint32
-	Chatty  bool
+	fidLock sync.RWMutex
 	Fids    map[protocol.Fid]*State
 	tagLock sync.Mutex
 	tags    map[protocol.Tag]bool
@@ -81,8 +84,8 @@ func (fs *FileServer) Version(r *protocol.VersionRequest) (resp *protocol.Versio
 		log.Printf("-> Version request")
 	}
 
-	fs.RLock()
-	defer fs.RUnlock()
+	fs.Lock()
+	defer fs.Unlock()
 	if r.MaxSize < DefaultMaxSize {
 		fs.MaxSize = r.MaxSize
 	} else {
@@ -130,17 +133,27 @@ func (fs *FileServer) Attach(r *protocol.AttachRequest) (resp *protocol.AttachRe
 	if fs.Chatty {
 		log.Printf("-> Attach request: %s, %s", r.Username, r.Service)
 	}
-	fs.Lock()
-	defer fs.Unlock()
+	fs.fidLock.Lock()
+	defer fs.fidLock.Unlock()
 
 	if _, ok := fs.Fids[r.Fid]; ok {
 		return nil, fmt.Errorf("fid already in use")
 	}
 
+	root := fs.Root
+
+	if root == nil {
+		if x, ok := fs.Roots[r.Service]; ok {
+			root = x
+		} else {
+			return nil, fmt.Errorf("no such service")
+		}
+	}
+
 	s := &State{
 		service:  r.Service,
 		username: r.Username,
-		location: ElementSlice{fs.Root},
+		location: ElementSlice{root},
 	}
 
 	fs.Fids[r.Fid] = s
@@ -184,9 +197,9 @@ func (fs *FileServer) Walk(r *protocol.WalkRequest) (resp *protocol.WalkResponse
 	if fs.Chatty {
 		log.Printf("-> Walk request: %v", r.Names)
 	}
-	fs.Lock()
-	defer fs.Unlock()
 
+	fs.fidLock.Lock()
+	defer fs.fidLock.Unlock()
 	s, ok := fs.Fids[r.Fid]
 	if !ok {
 		return nil, fmt.Errorf("no such fid")
@@ -300,9 +313,9 @@ func (fs *FileServer) Open(r *protocol.OpenRequest) (resp *protocol.OpenResponse
 	if fs.Chatty {
 		log.Printf("-> Open request")
 	}
-	fs.RLock()
-	defer fs.RUnlock()
 
+	fs.fidLock.RLock()
+	defer fs.fidLock.RUnlock()
 	s, ok := fs.Fids[r.Fid]
 	if !ok {
 		return nil, fmt.Errorf("no such fid")
@@ -341,9 +354,9 @@ func (fs *FileServer) Create(r *protocol.CreateRequest) (resp *protocol.CreateRe
 	if fs.Chatty {
 		log.Printf("-> Create request: %v", r.Name)
 	}
-	fs.RLock()
-	defer fs.RUnlock()
 
+	fs.fidLock.RLock()
+	defer fs.fidLock.RUnlock()
 	s, ok := fs.Fids[r.Fid]
 	if !ok {
 		return nil, fmt.Errorf("no such fid")
@@ -408,9 +421,9 @@ func (fs *FileServer) Read(r *protocol.ReadRequest) (resp *protocol.ReadResponse
 	if fs.Chatty {
 		log.Printf("-> Read request")
 	}
-	fs.RLock()
-	defer fs.RUnlock()
 
+	fs.fidLock.RLock()
+	defer fs.fidLock.RUnlock()
 	s, ok := fs.Fids[r.Fid]
 	if !ok {
 		return nil, fmt.Errorf("no such fid")
@@ -484,9 +497,9 @@ func (fs *FileServer) Write(r *protocol.WriteRequest) (resp *protocol.WriteRespo
 	if fs.Chatty {
 		log.Printf("-> Write request")
 	}
-	fs.RLock()
-	defer fs.RUnlock()
 
+	fs.fidLock.RLock()
+	defer fs.fidLock.RUnlock()
 	s, ok := fs.Fids[r.Fid]
 	if !ok {
 		return nil, fmt.Errorf("no such fid")
@@ -548,8 +561,9 @@ func (fs *FileServer) Clunk(r *protocol.ClunkRequest) (resp *protocol.ClunkRespo
 	if fs.Chatty {
 		log.Printf("-> Clunk request")
 	}
-	fs.Lock()
-	defer fs.Unlock()
+
+	fs.fidLock.Lock()
+	defer fs.fidLock.Unlock()
 	s, ok := fs.Fids[r.Fid]
 	if !ok {
 		return nil, fmt.Errorf("no such fid")
@@ -574,9 +588,9 @@ func (fs *FileServer) Remove(r *protocol.RemoveRequest) (resp *protocol.RemoveRe
 	if fs.Chatty {
 		log.Printf("-> Remove request")
 	}
-	fs.Lock()
-	defer fs.Unlock()
 
+	fs.fidLock.Lock()
+	defer fs.fidLock.Unlock()
 	s, ok := fs.Fids[r.Fid]
 	if !ok {
 		return nil, fmt.Errorf("no such fid")
@@ -623,9 +637,9 @@ func (fs *FileServer) Stat(r *protocol.StatRequest) (resp *protocol.StatResponse
 	if fs.Chatty {
 		log.Printf("-> Stat request")
 	}
-	fs.RLock()
-	defer fs.RUnlock()
 
+	fs.fidLock.RLock()
+	defer fs.fidLock.RUnlock()
 	s, ok := fs.Fids[r.Fid]
 	if !ok {
 		return nil, fmt.Errorf("no such fid")
@@ -658,9 +672,9 @@ func (fs *FileServer) WriteStat(r *protocol.WriteStatRequest) (resp *protocol.Wr
 	if fs.Chatty {
 		log.Printf("-> WriteStat request")
 	}
-	fs.Lock()
-	defer fs.Unlock()
 
+	fs.fidLock.Lock()
+	defer fs.fidLock.Unlock()
 	s, ok := fs.Fids[r.Fid]
 	if !ok {
 		return nil, fmt.Errorf("no such fid")
@@ -685,9 +699,10 @@ func (fs *FileServer) WriteStat(r *protocol.WriteStatRequest) (resp *protocol.Wr
 	return &protocol.WriteStatResponse{}, nil
 }
 
-func NewFileServer(root Dir, maxSize uint32, chatty bool) *FileServer {
+func NewFileServer(root Dir, roots map[string]Dir, maxSize uint32, chatty bool) *FileServer {
 	return &FileServer{
 		Root:    root,
+		Roots:   roots,
 		MaxSize: maxSize,
 		Chatty:  chatty,
 		Fids:    make(map[protocol.Fid]*State),
