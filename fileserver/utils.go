@@ -13,11 +13,11 @@ type locker interface {
 	Unlock()
 }
 
-/*
 type File interface {
 	locker
 
-	Open(user string, mode protocol.FileMode) (OpenFile, error)
+	Open(user string, mode protocol.OpenMode) (OpenFile, error)
+	Name() (string, error)
 	Stat() (protocol.Stat, error)
 	WriteStat(protocol.Stat) error
 	Qid() (protocol.Qid, error)
@@ -27,7 +27,7 @@ type File interface {
 type Dir interface {
 	File
 
-	Find(name string) (protocol.File, error)
+	Find(name string) (File, error)
 	Walk(func(File)) error
 	Empty() (bool, error)
 
@@ -41,62 +41,29 @@ type OpenFile interface {
 	Write(p []byte) (int, error)
 	Close() error
 }
-*/
 
-type Element interface {
-	locker
+type FilePath []File
 
-	Name() string
-	Qid() protocol.Qid
-	ApplyStat(protocol.Stat) error
-	Stat() protocol.Stat
-	Permissions() protocol.FileMode
-	Open(user string, mode protocol.OpenMode) error
-}
-
-type File interface {
-	Element
-
-	SetContent([]byte)
-	Content() []byte
-}
-
-type Dir interface {
-	Element
-
-	Empty() bool
-	Create(name string, perms protocol.FileMode) (Element, error)
-	Remove(Element) error
-	Walk(func(Element))
-	Find(name string) Element
-}
-
-type ElementSlice []Element
-
-func (es ElementSlice) Last() Element {
-	if len(es) == 0 {
+func (fp FilePath) Current() File {
+	if len(fp) == 0 {
 		return nil
 	}
-	return es[len(es)-1]
+	return fp[len(fp)-1]
 }
 
-func (es ElementSlice) Parent() Element {
-	if len(es) == 0 {
+func (fp FilePath) Parent() File {
+	if len(fp) == 0 {
 		return nil
+	} else if len(fp) == 1 {
+		return fp[len(fp)-1]
 	}
-	if len(es) == 1 {
-		return es[len(es)-1]
-	}
-	return es[len(es)-2]
+	return fp[len(fp)-2]
 }
 
-func setStat(user string, e Element, parent Element, nstat protocol.Stat) error {
-	ostat := e.Stat()
-
-	write := parent.Open(user, protocol.OWRITE) == nil
-	writeToParent := false
-	if parent != nil {
-		writeToParent = parent.Open(user, protocol.OWRITE) == nil
+func setStat(user string, e File, parent File, nstat protocol.Stat) error {
+	ostat, err := e.Stat()
+	if err != nil {
+		return err
 	}
 
 	needWrite := false
@@ -131,7 +98,11 @@ func setStat(user string, e Element, parent Element, nstat protocol.Stat) error 
 	if nstat.Name != "" && nstat.Name != ostat.Name {
 		if parent != nil {
 			parent := parent.(Dir)
-			if e := parent.Find(nstat.Name); e != nil {
+			taken, err := parent.Find(nstat.Name)
+			if err != nil {
+				return err
+			}
+			if taken != nil {
 				return errors.New("name already taken")
 			}
 			ostat.Name = nstat.Name
@@ -153,13 +124,23 @@ func setStat(user string, e Element, parent Element, nstat protocol.Stat) error 
 		return errors.New("it is illegal to modify muid")
 	}
 
-	if needParentWrite && !writeToParent {
-		return errors.New("write permissions required to parent directory")
+	if needParentWrite {
+		if parent != nil {
+			x, err := parent.Open(user, protocol.OWRITE)
+			if err != nil {
+				return err
+			}
+			x.Close()
+		}
 	}
 
-	if needWrite && !write {
-		return errors.New("write permissions required to element")
+	if needWrite {
+		x, err := parent.Open(user, protocol.OWRITE)
+		if err != nil {
+			return err
+		}
+		x.Close()
 	}
 
-	return e.ApplyStat(ostat)
+	return e.WriteStat(ostat)
 }

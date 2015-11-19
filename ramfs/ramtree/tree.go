@@ -1,6 +1,7 @@
 package ramtree
 
 import (
+	"bytes"
 	"errors"
 	"sync"
 	"time"
@@ -42,10 +43,79 @@ func permCheck(owner bool, permissions protocol.FileMode, mode protocol.OpenMode
 	}
 }
 
+type RAMOpenTree struct {
+	t      *RAMTree
+	buffer []byte
+	offset uint64
+}
+
+func (ot *RAMOpenTree) update() error {
+	ot.t.RLock()
+	defer ot.t.RUnlock()
+	buf := new(bytes.Buffer)
+	var e error
+	ot.t.Walk(func(f fileserver.File) {
+		if e != nil {
+			return
+		}
+		y, err := f.Stat()
+		if err != nil {
+			e = err
+			return
+		}
+		y.Encode(buf)
+	})
+
+	if e != nil {
+		return e
+	}
+	ot.buffer = buf.Bytes()
+	return nil
+}
+
+func (ot *RAMOpenTree) Seek(offset uint64) error {
+	if ot.t == nil {
+		return errors.New("file not open")
+	}
+	ot.t.RLock()
+	defer ot.t.RUnlock()
+	if offset != 0 && offset != ot.offset {
+		return errors.New("can only seek to 0 on directory")
+	}
+	ot.offset = offset
+	ot.update()
+	ot.t.atime = time.Now()
+	return nil
+}
+
+func (ot *RAMOpenTree) Read(p []byte) (int, error) {
+	if ot.t == nil {
+		return 0, errors.New("file not open")
+	}
+	ot.t.RLock()
+	defer ot.t.RUnlock()
+	rlen := uint64(len(p))
+	if rlen > uint64(len(ot.buffer))-ot.offset {
+		rlen = uint64(len(ot.buffer)) - ot.offset
+	}
+	copy(p, ot.buffer[ot.offset:rlen+ot.offset])
+	ot.offset += rlen
+	ot.t.atime = time.Now()
+	return int(rlen), nil
+}
+
+func (ot *RAMOpenTree) Write(p []byte) (int, error) {
+	return 0, errors.New("cannot write to directory")
+}
+
+func (ot *RAMOpenTree) Close() error {
+	ot.t = nil
+	return nil
+}
+
 type RAMTree struct {
 	sync.RWMutex
-	subtrees    []*RAMTree
-	subfiles    []*RAMFile
+	tree        []fileserver.File
 	id          uint64
 	name        string
 	user        string
@@ -57,22 +127,22 @@ type RAMTree struct {
 	permissions protocol.FileMode
 }
 
-func (t *RAMTree) Qid() protocol.Qid {
+func (t *RAMTree) Qid() (protocol.Qid, error) {
 	return protocol.Qid{
 		Type:    protocol.QTDIR,
 		Version: t.version,
 		Path:    t.id,
-	}
+	}, nil
 }
 
-func (t *RAMTree) Name() string {
+func (t *RAMTree) Name() (string, error) {
 	if t.name == "" {
-		return "/"
+		return "/", nil
 	}
-	return t.name
+	return t.name, nil
 }
 
-func (t *RAMTree) ApplyStat(s protocol.Stat) error {
+func (t *RAMTree) WriteStat(s protocol.Stat) error {
 	t.name = s.Name
 	t.user = s.UID
 	t.group = s.GID
@@ -83,56 +153,58 @@ func (t *RAMTree) ApplyStat(s protocol.Stat) error {
 	return nil
 }
 
-func (t *RAMTree) Stat() protocol.Stat {
+func (t *RAMTree) Stat() (protocol.Stat, error) {
+	q, err := t.Qid()
+	if err != nil {
+		return protocol.Stat{}, err
+	}
+	n, err := t.Name()
+	if err != nil {
+		return protocol.Stat{}, err
+	}
 	return protocol.Stat{
-		Qid:   t.Qid(),
+		Qid:   q,
 		Mode:  t.permissions | protocol.DMDIR,
-		Name:  t.Name(),
+		Name:  n,
 		UID:   t.user,
 		GID:   t.group,
 		MUID:  t.muser,
-		Atime: uint32(t.mtime.Unix()),
+		Atime: uint32(t.atime.Unix()),
 		Mtime: uint32(t.mtime.Unix()),
-	}
+	}, nil
 }
 
-func (t *RAMTree) Permissions() protocol.FileMode {
-	return t.permissions
-}
-
-func (t *RAMTree) Open(user string, mode protocol.OpenMode) error {
+func (t *RAMTree) Open(user string, mode protocol.OpenMode) (fileserver.OpenFile, error) {
 	owner := t.user == user
 
 	if !permCheck(owner, t.permissions, mode) {
-		return errors.New("access denied")
+		return nil, errors.New("access denied")
 	}
 
 	t.atime = time.Now()
-
-	return nil
+	return &RAMOpenTree{t: t}, nil
 }
 
-func (t *RAMTree) Empty() bool {
-	return (len(t.subtrees) + len(t.subfiles)) == 0
+func (t *RAMTree) Empty() (bool, error) {
+	return len(t.tree) == 0, nil
 }
 
-func (t *RAMTree) Create(name string, perms protocol.FileMode) (fileserver.Element, error) {
-	if t.Find(name) != nil {
+func (t *RAMTree) Create(name string, perms protocol.FileMode) (fileserver.File, error) {
+	_, err := t.Find(name)
+	if err != nil {
 		return nil, errors.New("file already exists")
 	}
 
-	var d fileserver.Element
+	var d fileserver.File
 	if perms&protocol.DMDIR != 0 {
 		perms = perms & (^protocol.FileMode(0777) | (t.permissions & 0777))
-		x := NewRAMTree(name, perms, t.user, t.group)
-		t.subtrees = append(t.subtrees, x)
-		d = x
+		d = NewRAMTree(name, perms, t.user, t.group)
 	} else {
 		perms = perms & (^protocol.FileMode(0666) | (t.permissions & 0666))
-		x := NewRAMFile(name, perms, t.user, t.group)
-		t.subfiles = append(t.subfiles, x)
-		d = x
+		d = NewRAMFile(name, perms, t.user, t.group)
 	}
+
+	t.tree = append(t.tree, d)
 
 	t.mtime = time.Now()
 	t.atime = t.mtime
@@ -140,57 +212,43 @@ func (t *RAMTree) Create(name string, perms protocol.FileMode) (fileserver.Eleme
 	return d, nil
 }
 
-func (t *RAMTree) Remove(other fileserver.Element) error {
-	switch other := other.(type) {
-	case *RAMTree:
-		for i := range t.subtrees {
-			if t.subtrees[i] == other {
-				t.subtrees = append(t.subtrees[:i], t.subtrees[i+1:]...)
-				t.mtime = time.Now()
-				t.atime = t.mtime
-				t.version++
-				return nil
-			}
-		}
-	case *RAMFile:
-		for i := range t.subfiles {
-			if t.subfiles[i] == other {
-				t.subfiles = append(t.subfiles[:i], t.subfiles[i+1:]...)
-				t.mtime = time.Now()
-				t.atime = t.mtime
-				t.version++
-				return nil
-			}
+func (t *RAMTree) Remove(other fileserver.File) error {
+	for i := range t.tree {
+		if t.tree[i] == other {
+			t.tree = append(t.tree[:i], t.tree[i+1:]...)
+			t.mtime = time.Now()
+			t.atime = t.mtime
+			t.version++
+			return nil
 		}
 	}
 	return errors.New("no such file")
 }
 
-func (t *RAMTree) Walk(cb func(fileserver.Element)) {
+func (t *RAMTree) Walk(cb func(fileserver.File)) error {
 	t.atime = time.Now()
-	for i := range t.subtrees {
-		cb(t.subtrees[i])
+	for i := range t.tree {
+		cb(t.tree[i])
 	}
-	for i := range t.subfiles {
-		cb(t.subfiles[i])
-	}
+	return nil
 }
 
-func (t *RAMTree) Find(name string) (d fileserver.Element) {
+func (t *RAMTree) Find(name string) (fileserver.File, error) {
 	t.atime = time.Now()
-	for i := range t.subtrees {
-		if t.subtrees[i].name == name {
-			return t.subtrees[i]
+	for i := range t.tree {
+		n, err := t.tree[i].Name()
+		if err != nil {
+			return nil, err
+		}
+		if n == name {
+			return t.tree[i], nil
 		}
 	}
+	return nil, nil
+}
 
-	for i := range t.subfiles {
-		if t.subfiles[i].name == name {
-			return t.subfiles[i]
-		}
-	}
-
-	return nil
+func (t *RAMTree) IsDir() (bool, error) {
+	return true, nil
 }
 
 func NewRAMTree(name string, permissions protocol.FileMode, user, group string) *RAMTree {
@@ -207,7 +265,7 @@ func NewRAMTree(name string, permissions protocol.FileMode, user, group string) 
 }
 
 type RAMOpenFile struct {
-	offset int
+	offset uint64
 	f      *RAMFile
 }
 
@@ -217,45 +275,55 @@ func (of *RAMOpenFile) Seek(offset uint64) error {
 	}
 	of.f.RLock()
 	defer of.f.RUnlock()
-	if offset > len(f.content) {
+	if offset > uint64(len(of.f.content)) {
 		return errors.New("seek past length")
 	}
-	of.offset = int(offset)
+	of.offset = uint64(offset)
+	of.f.atime = time.Now()
+	return nil
 }
 
 func (of *RAMOpenFile) Read(p []byte) (int, error) {
 	if of.f == nil {
-		return errors.New("file not open")
+		return 0, errors.New("file not open")
 	}
 	of.f.RLock()
 	defer of.f.RUnlock()
-	maxRead := len(p)
-	if maxRead > len(f.content)-of.offset {
-		maxRead = len(f.content) - of.offset
+	maxRead := uint64(len(p))
+	if maxRead > uint64(len(of.f.content))-of.offset {
+		maxRead = uint64(len(of.f.content)) - of.offset
 	}
 
-	copy(p, f.content[offset:maxRead+offset])
+	copy(p, of.f.content[of.offset:maxRead+of.offset])
 	of.offset += maxRead
-	return maxRead, nil
+	of.f.atime = time.Now()
+	return int(maxRead), nil
 }
 
 func (of *RAMOpenFile) Write(p []byte) (int, error) {
 	if of.f == nil {
-		return errors.New("file not open")
+		return 0, errors.New("file not open")
 	}
 
 	// TODO(kl): handle append-only
-	wlen := len(p)
-	if wlen+of.offset > len(f.content) {
+	wlen := uint64(len(p))
+
+	if wlen+of.offset > uint64(len(of.f.content)) {
 		b := make([]byte, wlen+of.offset)
-		copy(b, f.content[:of.offset])
+		copy(b, of.f.content[:of.offset])
+		of.f.content = b
 	}
 
-	copy(b[of.offset], p)
-	return wlen, nil
+	copy(of.f.content[of.offset:], p)
+
+	of.offset += wlen
+	of.f.mtime = time.Now()
+	of.f.atime = of.f.mtime
+	of.f.version++
+	return int(wlen), nil
 }
 
-func (of *RAMOpenClose) Close() error {
+func (of *RAMOpenFile) Close() error {
 	of.f = nil
 	return nil
 }
@@ -274,19 +342,19 @@ type RAMFile struct {
 	permissions protocol.FileMode
 }
 
-func (f *RAMFile) Name() string {
-	return f.name
+func (f *RAMFile) Name() (string, error) {
+	return f.name, nil
 }
 
-func (f *RAMFile) Qid() protocol.Qid {
+func (f *RAMFile) Qid() (protocol.Qid, error) {
 	return protocol.Qid{
 		Type:    protocol.QTFILE,
 		Version: f.version,
 		Path:    f.id,
-	}
+	}, nil
 }
 
-func (f *RAMFile) ApplyStat(s protocol.Stat) error {
+func (f *RAMFile) WriteStat(s protocol.Stat) error {
 	f.name = s.Name
 	f.user = s.UID
 	f.group = s.GID
@@ -297,45 +365,41 @@ func (f *RAMFile) ApplyStat(s protocol.Stat) error {
 	return nil
 }
 
-func (f *RAMFile) Stat() protocol.Stat {
+func (f *RAMFile) Stat() (protocol.Stat, error) {
+	q, err := f.Qid()
+	if err != nil {
+		return protocol.Stat{}, err
+	}
+	n, err := f.Name()
+	if err != nil {
+		return protocol.Stat{}, err
+	}
 	return protocol.Stat{
-		Qid:    f.Qid(),
+		Qid:    q,
 		Mode:   f.permissions,
-		Name:   f.Name(),
+		Name:   n,
 		Length: uint64(len(f.content)),
 		UID:    f.user,
 		GID:    f.user,
 		MUID:   f.user,
 		Atime:  uint32(f.atime.Unix()),
 		Mtime:  uint32(f.mtime.Unix()),
-	}
+	}, nil
 }
 
-func (f *RAMFile) Permissions() protocol.FileMode {
-	return f.permissions
-}
-
-func (f *RAMFile) Open(user string, mode protocol.OpenMode) error {
+func (f *RAMFile) Open(user string, mode protocol.OpenMode) (fileserver.OpenFile, error) {
 	owner := f.user == user
 	if !permCheck(owner, f.permissions, mode) {
-		return errors.New("access denied")
+		return nil, errors.New("access denied")
 	}
 
 	f.atime = time.Now()
 
-	return nil
+	return &RAMOpenFile{f: f}, nil
 }
 
-func (f *RAMFile) Content() []byte {
-	f.atime = time.Now()
-	return f.content
-}
-
-func (f *RAMFile) SetContent(b []byte) {
-	f.mtime = time.Now()
-	f.atime = f.mtime
-	f.version++
-	f.content = b
+func (f *RAMFile) IsDir() (bool, error) {
+	return false, nil
 }
 
 func NewRAMFile(name string, permissions protocol.FileMode, user, group string) *RAMFile {

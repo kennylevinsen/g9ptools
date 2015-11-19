@@ -1,7 +1,6 @@
 package fileserver
 
 import (
-	"bytes"
 	"fmt"
 	"log"
 	"sync"
@@ -16,9 +15,9 @@ const (
 
 type State struct {
 	sync.RWMutex
-	location ElementSlice
+	location FilePath
 
-	open     bool
+	open     OpenFile
 	mode     protocol.OpenMode
 	service  string
 	username string
@@ -140,26 +139,32 @@ func (fs *FileServer) Attach(r *protocol.AttachRequest) (resp *protocol.AttachRe
 		return nil, fmt.Errorf("fid already in use")
 	}
 
-	root := fs.Root
+	var root Dir
+	if x, ok := fs.Roots[r.Service]; ok {
+		root = x
+	} else if fs.Root != nil {
+		root = fs.Root
+	}
 
 	if root == nil {
-		if x, ok := fs.Roots[r.Service]; ok {
-			root = x
-		} else {
-			return nil, fmt.Errorf("no such service")
-		}
+		return nil, fmt.Errorf("no such service")
 	}
 
 	s := &State{
 		service:  r.Service,
 		username: r.Username,
-		location: ElementSlice{root},
+		location: FilePath{root},
 	}
 
 	fs.Fids[r.Fid] = s
 
+	q, err := s.location.Current().Qid()
+	if err != nil {
+		return nil, err
+	}
+
 	resp = &protocol.AttachResponse{
-		Qid: s.location.Last().Qid(),
+		Qid: q,
 	}
 
 	return resp, nil
@@ -208,6 +213,10 @@ func (fs *FileServer) Walk(r *protocol.WalkRequest) (resp *protocol.WalkResponse
 	s.Lock()
 	defer s.Unlock()
 
+	if s.open != nil {
+		return nil, fmt.Errorf("fid cannot be open for walk")
+	}
+
 	if _, ok = fs.Fids[r.NewFid]; ok {
 		return nil, fmt.Errorf("fid already in use")
 	}
@@ -224,10 +233,15 @@ func (fs *FileServer) Walk(r *protocol.WalkRequest) (resp *protocol.WalkResponse
 		return resp, nil
 	}
 
-	root, ok := s.location.Last().(Dir)
-	if !ok {
+	cur := s.location.Current()
+	d, err := cur.IsDir()
+	if err != nil {
+		return nil, err
+	}
+	if !d {
 		return nil, fmt.Errorf("fid not dir")
 	}
+	root := cur.(Dir)
 
 	newloc := s.location
 
@@ -239,12 +253,13 @@ func (fs *FileServer) Walk(r *protocol.WalkRequest) (resp *protocol.WalkResponse
 		root.RLock()
 		defer root.RUnlock()
 
-		if err := root.Open(s.username, protocol.OEXEC); err != nil {
-			log.Printf("Open failed: %v", err)
+		x, err := root.Open(s.username, protocol.OEXEC)
+		if err != nil {
 			goto write
 		}
+		x.Close()
 
-		var d Element
+		var d File
 		var istree bool
 
 		addToLoc := true
@@ -254,7 +269,10 @@ func (fs *FileServer) Walk(r *protocol.WalkRequest) (resp *protocol.WalkResponse
 			// This is a nop, but we should still report the result
 			d = root
 			addToLoc = false
-			_, istree = d.(Dir)
+			istree, err = d.IsDir()
+			if err != nil {
+				return nil, err
+			}
 		case "..":
 			// Go one directory up, or nop if we're at /
 			d = newloc.Parent()
@@ -262,20 +280,33 @@ func (fs *FileServer) Walk(r *protocol.WalkRequest) (resp *protocol.WalkResponse
 				newloc = newloc[:len(newloc)-1]
 				addToLoc = false
 			}
-			_, istree = d.(Dir)
+			istree, err = d.IsDir()
+			if err != nil {
+				return nil, err
+			}
 		default:
 			// Try to find the file
-			d = root.Find(name)
-			_, istree = d.(Dir)
+			d, err = root.Find(name)
+			if err != nil {
+				return nil, err
+			}
 			if d == nil {
 				goto write
+			}
+			istree, err = d.IsDir()
+			if err != nil {
+				return nil, err
 			}
 		}
 
 		if addToLoc {
 			newloc = append(newloc, d)
 		}
-		qids = append(qids, d.Qid())
+		q, err := d.Qid()
+		if err != nil {
+			return nil, err
+		}
+		qids = append(qids, q)
 
 		if i >= len(r.Names)-1 {
 			s := &State{
@@ -324,18 +355,23 @@ func (fs *FileServer) Open(r *protocol.OpenRequest) (resp *protocol.OpenResponse
 	s.Lock()
 	defer s.Unlock()
 
-	if s.open {
+	if s.open != nil {
 		return nil, fmt.Errorf("already open")
 	}
 
-	l := s.location.Last()
-	if err := l.Open(s.username, r.Mode); err != nil {
+	l := s.location.Current()
+	q, err := l.Qid()
+	if err != nil {
 		return nil, err
 	}
-	s.open = true
+	x, err := l.Open(s.username, r.Mode)
+	if err != nil {
+		return nil, err
+	}
+	s.open = x
 	s.mode = r.Mode
 	resp = &protocol.OpenResponse{
-		Qid: l.Qid(),
+		Qid: q,
 	}
 
 	return resp, nil
@@ -365,7 +401,7 @@ func (fs *FileServer) Create(r *protocol.CreateRequest) (resp *protocol.CreateRe
 	s.Lock()
 	defer s.Unlock()
 
-	if s.open {
+	if s.open != nil {
 		return nil, fmt.Errorf("already open")
 	}
 
@@ -373,37 +409,53 @@ func (fs *FileServer) Create(r *protocol.CreateRequest) (resp *protocol.CreateRe
 		return nil, fmt.Errorf("illegal name")
 	}
 
-	t, ok := s.location.Last().(Dir)
-	if !ok {
+	cur := s.location.Current()
+	isdir, err := cur.IsDir()
+	if err != nil {
+		return nil, err
+	}
+	if !isdir {
 		return nil, fmt.Errorf("not a directory")
 	}
+	t := cur.(Dir)
 
 	t.Lock()
 	defer t.Unlock()
 
-	if d := t.Find(r.Name); d != nil {
+	d, err := t.Find(r.Name)
+	if err != nil {
+		return nil, err
+	}
+	if d != nil {
 		return nil, fmt.Errorf("file already exists")
 	}
 
-	if err := t.Open(s.username, protocol.OWRITE); err != nil {
+	x, err := t.Open(s.username, protocol.OWRITE)
+	if err != nil {
 		return nil, fmt.Errorf("could not open directory for writing")
 	}
+	x.Close()
 
 	l, err := t.Create(r.Name, r.Permissions)
 	if err != nil {
 		return nil, err
 	}
 
-	s.location = append(s.location, l)
-
-	if err := l.Open(s.username, r.Mode); err != nil {
+	q, err := l.Qid()
+	if err != nil {
 		return nil, err
 	}
 
-	s.open = true
+	x, err = l.Open(s.username, r.Mode)
+	if err != nil {
+		return nil, err
+	}
+
+	s.location = append(s.location, l)
+	s.open = x
 	s.mode = r.Mode
 	resp = &protocol.CreateResponse{
-		Qid: l.Qid(),
+		Qid: q,
 	}
 
 	return resp, nil
@@ -419,7 +471,7 @@ func (fs *FileServer) Read(r *protocol.ReadRequest) (resp *protocol.ReadResponse
 	}()
 
 	if fs.Chatty {
-		log.Printf("-> Read request")
+		log.Printf("-> Read request: %d", r.Count)
 	}
 
 	fs.fidLock.RLock()
@@ -432,7 +484,7 @@ func (fs *FileServer) Read(r *protocol.ReadRequest) (resp *protocol.ReadResponse
 	s.RLock()
 	defer s.RUnlock()
 
-	if !s.open {
+	if s.open == nil {
 		return nil, fmt.Errorf("file not open")
 	}
 
@@ -440,46 +492,25 @@ func (fs *FileServer) Read(r *protocol.ReadRequest) (resp *protocol.ReadResponse
 		return nil, fmt.Errorf("file not opened for reading")
 	}
 
-	var data []byte
-
-	switch x := s.location.Last().(type) {
-	case Dir:
-		buf := new(bytes.Buffer)
-		x.RLock()
-		defer x.RUnlock()
-		x.Walk(func(e Element) {
-			y := e.Stat()
-			y.Encode(buf)
-		})
-		data = buf.Bytes()
-	case File:
-		x.RLock()
-		defer x.RUnlock()
-		data = x.Content()
-	default:
-		return nil, fmt.Errorf("unexpected error")
+	count := int(fs.MaxSize) - (&protocol.ReadResponse{}).EncodedLength() + protocol.HeaderSize
+	if count > int(r.Count) {
+		count = int(r.Count)
 	}
 
-	var max uint64
-	if r.Offset > uint64(len(data)) {
-		data = nil
-		goto write
-	}
-	max = uint64(len(data)) - r.Offset
-	if uint64(r.Count) < max {
-		max = uint64(r.Count)
-	}
+	b := make([]byte, count)
 
-	data = data[r.Offset : r.Offset+max]
-write:
+	err = s.open.Seek(r.Offset)
+	if err != nil {
+		return nil, err
+	}
+	n, err := s.open.Read(b)
+	if err != nil {
+		return nil, err
+	}
+	b = b[:n]
+
 	resp = &protocol.ReadResponse{
-		Data: data,
-	}
-
-	// Ensure that we obey the negotiated maxsize!
-	if resp.EncodedLength()+protocol.HeaderSize > int(fs.MaxSize) {
-		diff := r.EncodedLength() + protocol.HeaderSize - int(fs.MaxSize)
-		resp.Data = resp.Data[:len(resp.Data)-diff]
+		Data: b,
 	}
 
 	return resp, nil
@@ -508,7 +539,7 @@ func (fs *FileServer) Write(r *protocol.WriteRequest) (resp *protocol.WriteRespo
 	s.RLock()
 	defer s.RUnlock()
 
-	if !s.open {
+	if s.open == nil {
 		return nil, fmt.Errorf("file not open")
 	}
 
@@ -516,37 +547,20 @@ func (fs *FileServer) Write(r *protocol.WriteRequest) (resp *protocol.WriteRespo
 		return nil, fmt.Errorf("file not opened for writing")
 	}
 
-	switch x := s.location.Last().(type) {
-	case Dir:
-		return nil, fmt.Errorf("cannot write to directory")
-	case File:
-		x.Lock()
-		defer x.Unlock()
-		c := x.Content()
-		offset := r.Offset
-		if x.Permissions()&1<<30 != 0 {
-			offset = uint64(len(c) - 1)
-		}
-
-		if offset+uint64(len(r.Data)) > uint64(cap(c)) {
-			old := c
-			c = make([]byte, offset+uint64(len(r.Data)))
-			x.SetContent(c)
-
-			// Copy, but don't copy data we're about to override
-			copy(c, old[:offset])
-		}
-
-		copy(c[offset:], r.Data)
-
-		resp = &protocol.WriteResponse{
-			Count: uint32(len(r.Data)),
-		}
-
-		return resp, nil
+	err = s.open.Seek(r.Offset)
+	if err != nil {
+		return nil, err
+	}
+	n, err := s.open.Write(r.Data)
+	if err != nil {
+		return nil, err
 	}
 
-	return nil, fmt.Errorf("unexpected error")
+	resp = &protocol.WriteResponse{
+		Count: uint32(n),
+	}
+
+	return resp, nil
 }
 
 func (fs *FileServer) Clunk(r *protocol.ClunkRequest) (resp *protocol.ClunkResponse, err error) {
@@ -572,6 +586,11 @@ func (fs *FileServer) Clunk(r *protocol.ClunkRequest) (resp *protocol.ClunkRespo
 	s.Lock()
 	defer s.Unlock()
 
+	if s.open != nil {
+		s.open.Close()
+		s.open = nil
+	}
+
 	delete(fs.Fids, r.Fid)
 	return &protocol.ClunkResponse{}, nil
 }
@@ -595,33 +614,44 @@ func (fs *FileServer) Remove(r *protocol.RemoveRequest) (resp *protocol.RemoveRe
 	if !ok {
 		return nil, fmt.Errorf("no such fid")
 	}
+	defer delete(fs.Fids, r.Fid)
 	s.Lock()
 	defer s.Unlock()
 
-	var l, p Element
+	if s.open != nil {
+		s.open.Close()
+		s.open = nil
+	}
+
+	var cur, p File
 
 	// We're not going to remove /.
 	if len(s.location) <= 1 {
-		goto write
+		return &protocol.RemoveResponse{}, nil
 	}
 
 	// Attempt to delete it.
-	l = s.location.Last()
+	cur = s.location.Current()
 
-	if x, ok := l.(Dir); ok {
-		if !x.Empty() {
-			goto write
+	isdir, err := cur.IsDir()
+	if isdir {
+		e, err := cur.(Dir).Empty()
+		if err != nil {
+			return nil, err
+		}
+		if !e {
+			return &protocol.RemoveResponse{}, nil
 		}
 	}
 
 	p = s.location.Parent()
-	if err := p.Open(s.username, protocol.OWRITE); err != nil {
-		goto write
+	x, err := p.Open(s.username, protocol.OWRITE)
+	if err != nil {
+		return &protocol.RemoveResponse{}, nil
 	}
-	p.(Dir).Remove(l)
+	x.Close()
+	p.(Dir).Remove(cur)
 
-write:
-	delete(fs.Fids, r.Fid)
 	return &protocol.RemoveResponse{}, nil
 }
 
@@ -648,13 +678,18 @@ func (fs *FileServer) Stat(r *protocol.StatRequest) (resp *protocol.StatResponse
 	s.RLock()
 	defer s.RUnlock()
 
-	l := s.location.Last()
+	l := s.location.Current()
 	if l == nil {
 		return nil, fmt.Errorf("no such file")
 	}
 
+	st, err := l.Stat()
+	if err != nil {
+		return nil, err
+	}
+
 	resp = &protocol.StatResponse{
-		Stat: l.Stat(),
+		Stat: st,
 	}
 
 	return resp, nil
@@ -683,8 +718,8 @@ func (fs *FileServer) WriteStat(r *protocol.WriteStatRequest) (resp *protocol.Wr
 	s.Lock()
 	defer s.Unlock()
 
-	var l, p Element
-	l = s.location.Last()
+	var l, p File
+	l = s.location.Current()
 	if l == nil {
 		return nil, fmt.Errorf("no such file")
 	}
