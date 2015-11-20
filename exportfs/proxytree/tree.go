@@ -1,0 +1,329 @@
+package proxytree
+
+import (
+	"bytes"
+	"errors"
+	"os"
+	"os/user"
+	"path/filepath"
+	"strconv"
+	"sync"
+	"syscall"
+
+	"github.com/joushou/g9p/protocol"
+	"github.com/joushou/g9ptools/fileserver"
+)
+
+func permCheck(permissions protocol.FileMode, mode protocol.OpenMode) bool {
+	var offset uint = 6
+	switch mode & 3 {
+	case protocol.OREAD:
+		return permissions&(1<<(2+offset)) != 0
+	case protocol.OWRITE:
+		return permissions&(1<<(1+offset)) != 0
+	case protocol.ORDWR:
+		return (permissions&(1<<(2+offset)) != 0) && (permissions&(1<<(1+offset)) != 0)
+	case protocol.OEXEC:
+		return permissions&(1<<offset) != 0
+	default:
+		return false
+	}
+}
+
+func openMode2Flag(fm protocol.OpenMode) int {
+	var nfm int
+
+	switch fm & 0xF {
+	case protocol.OREAD:
+		nfm = os.O_RDONLY
+	case protocol.OWRITE:
+		nfm = os.O_WRONLY
+	case protocol.ORDWR:
+		nfm = os.O_RDWR
+	case protocol.OEXEC:
+		// We most likely don't want to enter here, ever
+		nfm = os.O_RDONLY
+	}
+
+	switch fm & 0xF0 {
+	case protocol.OTRUNC:
+		nfm |= os.O_TRUNC
+	}
+
+	return nfm
+}
+
+type ProxyOpenTree struct {
+	t      *ProxyFile
+	f      *os.File
+	path   string
+	buffer []byte
+	offset int64
+}
+
+func (ot *ProxyOpenTree) update() error {
+	_, err := ot.f.Seek(0, 0)
+	if err != nil {
+		return err
+	}
+
+	buf := new(bytes.Buffer)
+	dir, err := ot.f.Readdir(-1)
+	if err != nil {
+		return err
+	}
+
+	for _, f := range dir {
+		pf := &ProxyFile{
+			path: f.Name(), //filepath.Join(ot.path, f.Name()),
+			info: f,
+		}
+
+		// We gave it a stat, we just need the encoding
+		pf.cache(true)
+		y, err := pf.Stat()
+		if err != nil {
+			return err
+		}
+		y.Encode(buf)
+	}
+	ot.buffer = buf.Bytes()
+	return nil
+}
+
+func (ot *ProxyOpenTree) Seek(offset int64, whence int) (int64, error) {
+	if ot.t == nil {
+		return 0, errors.New("file not open")
+	}
+	length := int64(len(ot.buffer))
+	switch whence {
+	case 0:
+	case 1:
+		offset = ot.offset + offset
+	case 2:
+		offset = length + offset
+	default:
+		return ot.offset, errors.New("invalid whence value")
+	}
+
+	if offset < 0 {
+		return ot.offset, errors.New("negative seek invalid")
+	}
+
+	if offset != 0 && offset != ot.offset {
+		return ot.offset, errors.New("seek to other than 0 on dir illegal")
+	}
+
+	ot.offset = offset
+	ot.update()
+	return ot.offset, nil
+}
+
+func (ot *ProxyOpenTree) Read(p []byte) (int, error) {
+	if ot.t == nil {
+		return 0, errors.New("file not open")
+	}
+	rlen := int64(len(p))
+	if rlen > int64(len(ot.buffer))-ot.offset {
+		rlen = int64(len(ot.buffer)) - ot.offset
+	}
+	copy(p, ot.buffer[ot.offset:rlen+ot.offset])
+	ot.offset += rlen
+	return int(rlen), nil
+}
+
+func (ot *ProxyOpenTree) Write(p []byte) (int, error) {
+	return 0, errors.New("cannot write to directory")
+}
+
+func (ot *ProxyOpenTree) Close() error {
+	ot.t = nil
+	return ot.f.Close()
+}
+
+type ProxyFile struct {
+	sync.RWMutex
+	root    string
+	path    string
+	info    os.FileInfo
+	caching int
+}
+
+func (pf *ProxyFile) updateInfo() error {
+	if pf.caching > 0 {
+		return nil
+	}
+	var err error
+	pf.info, err = os.Stat(filepath.Join(pf.root, pf.path))
+	return err
+}
+
+func (pf *ProxyFile) cache(t bool) {
+	if t {
+		pf.caching++
+	} else {
+		pf.caching--
+	}
+}
+
+func (pf *ProxyFile) Qid() (protocol.Qid, error) {
+	if err := pf.updateInfo(); err != nil {
+		return protocol.Qid{}, err
+	}
+
+	var path uint64
+	switch s := pf.info.Sys().(type) {
+	case *syscall.Stat_t:
+		path = s.Ino
+	default:
+		return protocol.Qid{}, errors.New("unknown stat struct")
+	}
+
+	var tp protocol.QidType
+	if pf.info.IsDir() {
+		tp |= protocol.QTDIR
+	}
+
+	return protocol.Qid{
+		Path:    path,
+		Version: uint32(pf.info.ModTime().UnixNano() / 1000000),
+		Type:    tp,
+	}, nil
+}
+
+func (pe *ProxyFile) Name() (string, error) {
+	n := filepath.Base(pe.path)
+	if n == "" {
+		return "/", nil
+	}
+	return n, nil
+}
+
+func (*ProxyFile) WriteStat(s protocol.Stat) error {
+	return errors.New("not implemented")
+}
+
+func (pf *ProxyFile) Stat() (protocol.Stat, error) {
+	if err := pf.updateInfo(); err != nil {
+		return protocol.Stat{}, err
+	}
+	pf.cache(true)
+	defer pf.cache(false)
+
+	var err error
+	st := protocol.Stat{}
+	switch s := pf.info.Sys().(type) {
+	case *syscall.Stat_t:
+		st.Qid, err = pf.Qid()
+		if err != nil {
+			return protocol.Stat{}, err
+		}
+		st.Mode = protocol.FileMode(pf.info.Mode() & 0777)
+		if s.Mode&syscall.S_IFDIR != 0 {
+			st.Mode |= protocol.DMDIR
+		}
+		st.Atime = uint32(pf.info.ModTime().Unix())
+		st.Mtime = st.Mtime
+		st.Length = uint64(pf.info.Size())
+		st.Name = filepath.Base(pf.path)
+		st.UID = strconv.Itoa(int(s.Uid))
+		st.GID = strconv.Itoa(int(s.Gid))
+		st.MUID = st.UID
+	default:
+		// TODO(kl): ERROR!
+		return protocol.Stat{}, errors.New("unknown stat struct")
+	}
+
+	u, err := user.LookupId(st.UID)
+	if err == nil {
+		st.UID = u.Username
+	}
+
+	return st, nil
+}
+
+func (pf *ProxyFile) Open(_ string, mode protocol.OpenMode) (fileserver.OpenFile, error) {
+	if err := pf.updateInfo(); err != nil {
+		return nil, err
+	}
+	pf.cache(true)
+	defer pf.cache(false)
+
+	f, err := os.OpenFile(filepath.Join(pf.root, pf.path), openMode2Flag(mode), 0)
+	if err != nil {
+		return nil, err
+	}
+
+	if p, _ := pf.IsDir(); p {
+		return &ProxyOpenTree{
+			t:    pf,
+			f:    f,
+			path: filepath.Join(pf.root, pf.path),
+		}, nil
+	}
+
+	return f, nil
+}
+
+func (pf *ProxyFile) CanRemove() (bool, error) {
+	return false, nil
+}
+
+func (pf *ProxyFile) Walk(_, name string) (fileserver.File, error) {
+	p := filepath.Join(pf.path, name)
+
+	if _, err := os.Stat(filepath.Join(pf.root, p)); os.IsNotExist(err) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+
+	return &ProxyFile{
+		root: pf.root,
+		path: p,
+	}, nil
+}
+
+func (pf *ProxyFile) Create(_, name string, perms protocol.FileMode) (fileserver.File, error) {
+	p := filepath.Join(pf.path, name)
+	if perms&protocol.DMDIR != 0 {
+		err := os.Mkdir(filepath.Join(pf.root, p), os.FileMode(perms&0777))
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		f, err := os.OpenFile(filepath.Join(pf.root, p), os.O_CREATE|os.O_EXCL, os.FileMode(perms&0777))
+		if err != nil {
+			return nil, err
+		}
+		f.Close()
+	}
+
+	return &ProxyFile{
+		root: pf.root,
+		path: p,
+	}, nil
+}
+
+func (pf *ProxyFile) Remove(_, name string) error {
+	p := filepath.Join(pf.path, name)
+	return os.Remove(filepath.Join(pf.root, p))
+}
+
+func (pf *ProxyFile) IsDir() (bool, error) {
+	if err := pf.updateInfo(); err != nil {
+		return false, err
+	}
+	switch s := pf.info.Sys().(type) {
+	case *syscall.Stat_t:
+		return s.Mode&syscall.S_IFDIR != 0, nil
+	default:
+		return false, errors.New("unknown stat type")
+	}
+}
+
+func NewProxyTree(root string) fileserver.Dir {
+	return &ProxyFile{
+		root: root,
+	}
+}
