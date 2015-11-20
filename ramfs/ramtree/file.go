@@ -10,22 +10,38 @@ import (
 )
 
 type RAMOpenFile struct {
-	offset uint64
+	offset int64
 	f      *RAMFile
 }
 
-func (of *RAMOpenFile) Seek(offset uint64) error {
+func (of *RAMOpenFile) Seek(offset int64, whence int) (int64, error) {
 	if of.f == nil {
-		return errors.New("file not open")
+		return 0, errors.New("file not open")
 	}
 	of.f.RLock()
 	defer of.f.RUnlock()
-	if offset > uint64(len(of.f.content)) {
-		return errors.New("seek past length")
+	length := int64(len(of.f.content))
+	switch whence {
+	case 0:
+	case 1:
+		offset = of.offset + offset
+	case 2:
+		offset = length + offset
+	default:
+		return of.offset, errors.New("invalid whence value")
 	}
-	of.offset = uint64(offset)
+
+	if offset < 0 {
+		return of.offset, errors.New("negative seek invalid")
+	}
+
+	if offset > int64(len(of.f.content)) {
+		return of.offset, errors.New("seek past length")
+	}
+
+	of.offset = offset
 	of.f.atime = time.Now()
-	return nil
+	return of.offset, nil
 }
 
 func (of *RAMOpenFile) Read(p []byte) (int, error) {
@@ -34,9 +50,9 @@ func (of *RAMOpenFile) Read(p []byte) (int, error) {
 	}
 	of.f.RLock()
 	defer of.f.RUnlock()
-	maxRead := uint64(len(p))
-	if maxRead > uint64(len(of.f.content))-of.offset {
-		maxRead = uint64(len(of.f.content)) - of.offset
+	maxRead := int64(len(p))
+	if maxRead > int64(len(of.f.content))-of.offset {
+		maxRead = int64(len(of.f.content)) - of.offset
 	}
 
 	copy(p, of.f.content[of.offset:maxRead+of.offset])
@@ -51,9 +67,9 @@ func (of *RAMOpenFile) Write(p []byte) (int, error) {
 	}
 
 	// TODO(kl): handle append-only
-	wlen := uint64(len(p))
+	wlen := int64(len(p))
 
-	if wlen+of.offset > uint64(len(of.f.content)) {
+	if wlen+of.offset > int64(len(of.f.content)) {
 		b := make([]byte, wlen+of.offset)
 		copy(b, of.f.content[:of.offset])
 		of.f.content = b
@@ -78,7 +94,7 @@ func (of *RAMOpenFile) Close() error {
 
 type RAMFile struct {
 	sync.RWMutex
-	parent fileserver.File
+	parent      fileserver.File
 	content     []byte
 	id          uint64
 	name        string
@@ -158,6 +174,10 @@ func (f *RAMFile) Open(user string, mode protocol.OpenMode) (fileserver.OpenFile
 
 func (f *RAMFile) IsDir() (bool, error) {
 	return false, nil
+}
+
+func (f *RAMFile) CanRemove() (bool, error) {
+	return true, nil
 }
 
 func NewRAMFile(name string, permissions protocol.FileMode, user, group string) *RAMFile {

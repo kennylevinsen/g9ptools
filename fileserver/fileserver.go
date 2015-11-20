@@ -77,9 +77,6 @@ func (fs *FileServer) Version(r *protocol.VersionRequest) (resp *protocol.Versio
 			resp = nil
 			err = g9p.ErrFlushed
 		}
-		if fs.Chatty {
-			log.Printf("<- Version response")
-		}
 	}()
 
 	if fs.Chatty {
@@ -129,9 +126,6 @@ func (fs *FileServer) Attach(r *protocol.AttachRequest) (resp *protocol.AttachRe
 		if fs.flushed(r) {
 			resp = nil
 			err = g9p.ErrFlushed
-		}
-		if fs.Chatty {
-			log.Printf("<- Attach response")
 		}
 	}()
 
@@ -183,9 +177,6 @@ func (fs *FileServer) Flush(r *protocol.FlushRequest) (resp *protocol.FlushRespo
 			resp = nil
 			err = g9p.ErrFlushed
 		}
-		if fs.Chatty {
-			log.Printf("<- Flush response")
-		}
 	}()
 
 	if fs.Chatty {
@@ -205,9 +196,6 @@ func (fs *FileServer) Walk(r *protocol.WalkRequest) (resp *protocol.WalkResponse
 		if fs.flushed(r) {
 			resp = nil
 			err = g9p.ErrFlushed
-		}
-		if fs.Chatty {
-			log.Printf("<- Walk response")
 		}
 	}()
 
@@ -331,9 +319,6 @@ func (fs *FileServer) Open(r *protocol.OpenRequest) (resp *protocol.OpenResponse
 			resp = nil
 			err = g9p.ErrFlushed
 		}
-		if fs.Chatty {
-			log.Printf("<- Open response")
-		}
 	}()
 
 	if fs.Chatty {
@@ -380,9 +365,6 @@ func (fs *FileServer) Create(r *protocol.CreateRequest) (resp *protocol.CreateRe
 		if fs.flushed(r) {
 			resp = nil
 			err = g9p.ErrFlushed
-		}
-		if fs.Chatty {
-			log.Printf("<- Create response")
 		}
 	}()
 
@@ -450,9 +432,6 @@ func (fs *FileServer) Read(r *protocol.ReadRequest) (resp *protocol.ReadResponse
 			resp = nil
 			err = g9p.ErrFlushed
 		}
-		if fs.Chatty {
-			log.Printf("<- Read response")
-		}
 	}()
 
 	if fs.Chatty {
@@ -484,7 +463,7 @@ func (fs *FileServer) Read(r *protocol.ReadRequest) (resp *protocol.ReadResponse
 
 	b := make([]byte, count)
 
-	err = s.open.Seek(r.Offset)
+	_, err = s.open.Seek(int64(r.Offset), 0)
 	if err != nil {
 		return nil, err
 	}
@@ -507,9 +486,6 @@ func (fs *FileServer) Write(r *protocol.WriteRequest) (resp *protocol.WriteRespo
 		if fs.flushed(r) {
 			resp = nil
 			err = g9p.ErrFlushed
-		}
-		if fs.Chatty {
-			log.Printf("<- Write response")
 		}
 	}()
 
@@ -535,7 +511,7 @@ func (fs *FileServer) Write(r *protocol.WriteRequest) (resp *protocol.WriteRespo
 		return nil, fmt.Errorf("file not opened for writing")
 	}
 
-	err = s.open.Seek(r.Offset)
+	_, err = s.open.Seek(int64(r.Offset), 0)
 	if err != nil {
 		return nil, err
 	}
@@ -557,9 +533,6 @@ func (fs *FileServer) Clunk(r *protocol.ClunkRequest) (resp *protocol.ClunkRespo
 		if fs.flushed(r) {
 			resp = nil
 			err = g9p.ErrFlushed
-		}
-		if fs.Chatty {
-			log.Printf("<- Clunk response")
 		}
 	}()
 
@@ -593,9 +566,6 @@ func (fs *FileServer) Remove(r *protocol.RemoveRequest) (resp *protocol.RemoveRe
 			resp = nil
 			err = g9p.ErrFlushed
 		}
-		if fs.Chatty {
-			log.Printf("<- Remove response")
-		}
 	}()
 
 	if fs.Chatty {
@@ -627,7 +597,11 @@ func (fs *FileServer) Remove(r *protocol.RemoveRequest) (resp *protocol.RemoveRe
 	// Attempt to delete it, but ignore error.
 	cur = s.location.Current()
 	p = s.location.Parent()
-	p.(Dir).Remove(s.username, cur)
+	n, err := cur.Name()
+	if err != nil {
+		return nil, err
+	}
+	p.(Dir).Remove(s.username, n)
 
 	return &protocol.RemoveResponse{}, nil
 }
@@ -638,9 +612,6 @@ func (fs *FileServer) Stat(r *protocol.StatRequest) (resp *protocol.StatResponse
 		if fs.flushed(r) {
 			resp = nil
 			err = g9p.ErrFlushed
-		}
-		if fs.Chatty {
-			log.Printf("<- Stat response")
 		}
 	}()
 

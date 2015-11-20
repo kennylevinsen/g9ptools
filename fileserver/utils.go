@@ -16,20 +16,19 @@ type File interface {
 	WriteStat(protocol.Stat) error
 
 	IsDir() (bool, error)
-
+	CanRemove() (bool, error)
 }
 
 type Dir interface {
 	File
 
-	Empty() (bool, error)
 	Walk(user, name string) (File, error)
 	Create(user, name string, perms protocol.FileMode) (File, error)
-	Remove(user string, file File) error
+	Remove(user, name string) error
 }
 
 type OpenFile interface {
-	Seek(offset uint64) error
+	Seek(offset int64, whence int) (int64, error)
 	Read(p []byte) (int, error)
 	Write(p []byte) (int, error)
 	Close() error

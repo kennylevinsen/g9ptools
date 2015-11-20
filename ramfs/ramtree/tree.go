@@ -13,7 +13,7 @@ import (
 type RAMOpenTree struct {
 	t      *RAMTree
 	buffer []byte
-	offset uint64
+	offset int64
 }
 
 func (ot *RAMOpenTree) update() error {
@@ -31,19 +31,35 @@ func (ot *RAMOpenTree) update() error {
 	return nil
 }
 
-func (ot *RAMOpenTree) Seek(offset uint64) error {
+func (ot *RAMOpenTree) Seek(offset int64, whence int) (int64, error) {
 	if ot.t == nil {
-		return errors.New("file not open")
+		return 0, errors.New("file not open")
 	}
 	ot.t.RLock()
 	defer ot.t.RUnlock()
-	if offset != 0 && offset != ot.offset {
-		return errors.New("can only seek to 0 on directory")
+	length := int64(len(ot.buffer))
+	switch whence {
+	case 0:
+	case 1:
+		offset = ot.offset + offset
+	case 2:
+		offset = length + offset
+	default:
+		return ot.offset, errors.New("invalid whence value")
 	}
+
+	if offset < 0 {
+		return ot.offset, errors.New("negative seek invalid")
+	}
+
+	if offset != 0 && offset != ot.offset {
+		return ot.offset, errors.New("seek to other than 0 on dir illegal")
+	}
+
 	ot.offset = offset
 	ot.update()
 	ot.t.atime = time.Now()
-	return nil
+	return ot.offset, nil
 }
 
 func (ot *RAMOpenTree) Read(p []byte) (int, error) {
@@ -52,9 +68,9 @@ func (ot *RAMOpenTree) Read(p []byte) (int, error) {
 	}
 	ot.t.RLock()
 	defer ot.t.RUnlock()
-	rlen := uint64(len(p))
-	if rlen > uint64(len(ot.buffer))-ot.offset {
-		rlen = uint64(len(ot.buffer)) - ot.offset
+	rlen := int64(len(p))
+	if rlen > int64(len(ot.buffer))-ot.offset {
+		rlen = int64(len(ot.buffer)) - ot.offset
 	}
 	copy(p, ot.buffer[ot.offset:rlen+ot.offset])
 	ot.offset += rlen
@@ -76,7 +92,7 @@ func (ot *RAMOpenTree) Close() error {
 
 type RAMTree struct {
 	sync.RWMutex
-	parent fileserver.File
+	parent      fileserver.File
 	tree        map[string]fileserver.File
 	id          uint64
 	name        string
@@ -164,7 +180,7 @@ func (t *RAMTree) Open(user string, mode protocol.OpenMode) (fileserver.OpenFile
 	return &RAMOpenTree{t: t}, nil
 }
 
-func (t *RAMTree) Empty() (bool, error) {
+func (t *RAMTree) CanRemove() (bool, error) {
 	return len(t.tree) == 0, nil
 }
 
@@ -234,7 +250,7 @@ func (t *RAMTree) Rename(user, oldname, newname string) error {
 	return nil
 }
 
-func (t *RAMTree) Remove(user string, other fileserver.File) error {
+func (t *RAMTree) Remove(user, name string) error {
 	t.Lock()
 	defer t.Unlock()
 	owner := t.user == user
@@ -242,31 +258,23 @@ func (t *RAMTree) Remove(user string, other fileserver.File) error {
 		return errors.New("access denied")
 	}
 
-	for i := range t.tree {
-		if t.tree[i] == other {
-			d, err := other.IsDir()
-			if err != nil {
-				return err
-			}
-			if d {
-				e, err := other.(fileserver.Dir).Empty()
-				if err != nil {
-					return err
-				}
-				if !e {
-					return errors.New("directory not empty")
-				}
-			}
-			delete(t.tree, i)
-			t.mtime = time.Now()
-			t.atime = t.mtime
-			t.version++
-			return nil
+	if f, ok := t.tree[name]; ok {
+		rem, err := f.CanRemove()
+		if err != nil {
+			return err
 		}
+		if !rem {
+			return errors.New("file could not be removed")
+		}
+		delete(t.tree, name)
+		t.mtime = time.Now()
+		t.atime = t.mtime
+		t.version++
+		return nil
 	}
+
 	return errors.New("no such file")
 }
-
 
 func (t *RAMTree) Walk(user string, name string) (fileserver.File, error) {
 	t.Lock()
@@ -292,7 +300,7 @@ func (t *RAMTree) IsDir() (bool, error) {
 func NewRAMTree(name string, permissions protocol.FileMode, user, group string) *RAMTree {
 	return &RAMTree{
 		name:        name,
-		tree: make(map[string]fileserver.File),
+		tree:        make(map[string]fileserver.File),
 		permissions: permissions,
 		user:        user,
 		group:       group,
