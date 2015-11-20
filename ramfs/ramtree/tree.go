@@ -20,7 +20,6 @@ func (ot *RAMOpenTree) update() error {
 	ot.t.RLock()
 	defer ot.t.RUnlock()
 	buf := new(bytes.Buffer)
-	var e error
 	for _, i := range ot.t.tree {
 		y, err := i.Stat()
 		if err != nil {
@@ -107,8 +106,8 @@ func (t *RAMTree) Qid() (protocol.Qid, error) {
 }
 
 func (t *RAMTree) Name() (string, error) {
-	t.tree.Lock()
-	defer t.tree.Unlock()
+	t.RLock()
+	defer t.RUnlock()
 	if t.name == "" {
 		return "/", nil
 	}
@@ -116,8 +115,8 @@ func (t *RAMTree) Name() (string, error) {
 }
 
 func (t *RAMTree) WriteStat(s protocol.Stat) error {
-	t.tree.Lock()
-	defer t.tree.Unlock()
+	t.Lock()
+	defer t.Unlock()
 	t.name = s.Name
 	t.user = s.UID
 	t.group = s.GID
@@ -129,8 +128,8 @@ func (t *RAMTree) WriteStat(s protocol.Stat) error {
 }
 
 func (t *RAMTree) Stat() (protocol.Stat, error) {
-	t.tree.Lock()
-	defer t.tree.Unlock()
+	t.RLock()
+	defer t.RUnlock()
 	q, err := t.Qid()
 	if err != nil {
 		return protocol.Stat{}, err
@@ -152,8 +151,8 @@ func (t *RAMTree) Stat() (protocol.Stat, error) {
 }
 
 func (t *RAMTree) Open(user string, mode protocol.OpenMode) (fileserver.OpenFile, error) {
-	t.tree.Lock()
-	defer t.tree.Unlock()
+	t.Lock()
+	defer t.Unlock()
 	owner := t.user == user
 
 	if !permCheck(owner, t.permissions, mode) {
@@ -161,8 +160,6 @@ func (t *RAMTree) Open(user string, mode protocol.OpenMode) (fileserver.OpenFile
 	}
 
 	t.atime = time.Now()
-	t.Lock()
-	defer t.Unlock()
 	t.opens++
 	return &RAMOpenTree{t: t}, nil
 }
@@ -172,8 +169,8 @@ func (t *RAMTree) Empty() (bool, error) {
 }
 
 func (t *RAMTree) Create(user, name string, perms protocol.FileMode) (fileserver.File, error) {
-	t.tree.Lock()
-	defer t.tree.Unlock()
+	t.Lock()
+	defer t.Unlock()
 	owner := t.user == user
 	if !permCheck(owner, t.permissions, protocol.OWRITE) {
 		return nil, errors.New("access denied")
@@ -202,8 +199,8 @@ func (t *RAMTree) Create(user, name string, perms protocol.FileMode) (fileserver
 }
 
 func (t *RAMTree) Add(name string, f fileserver.File) error {
-	t.tree.Lock()
-	defer t.tree.Unlock()
+	t.Lock()
+	defer t.Unlock()
 	_, ok := t.tree[name]
 	if ok {
 		return errors.New("file already exists")
@@ -218,7 +215,7 @@ func (t *RAMTree) Add(name string, f fileserver.File) error {
 func (t *RAMTree) Rename(user, oldname, newname string) error {
 	t.Lock()
 	defer t.Unlock()
-	f, ok := t.tree[oldname]
+	_, ok := t.tree[oldname]
 	if !ok {
 		return errors.New("file not found")
 	}
@@ -234,11 +231,12 @@ func (t *RAMTree) Rename(user, oldname, newname string) error {
 
 	t.tree[newname] = t.tree[oldname]
 	delete(t.tree, oldname)
+	return nil
 }
 
 func (t *RAMTree) Remove(user string, other fileserver.File) error {
-	t.tree.Lock()
-	defer t.tree.Unlock()
+	t.Lock()
+	defer t.Unlock()
 	owner := t.user == user
 	if !permCheck(owner, t.permissions, protocol.OWRITE) {
 		return errors.New("access denied")
@@ -271,8 +269,8 @@ func (t *RAMTree) Remove(user string, other fileserver.File) error {
 
 
 func (t *RAMTree) Walk(user string, name string) (fileserver.File, error) {
-	t.tree.Lock()
-	defer t.tree.Unlock()
+	t.Lock()
+	defer t.Unlock()
 	owner := t.user == user
 	if !permCheck(owner, t.permissions, protocol.OEXEC) {
 		return nil, errors.New("access denied")
@@ -294,6 +292,7 @@ func (t *RAMTree) IsDir() (bool, error) {
 func NewRAMTree(name string, permissions protocol.FileMode, user, group string) *RAMTree {
 	return &RAMTree{
 		name:        name,
+		tree: make(map[string]fileserver.File),
 		permissions: permissions,
 		user:        user,
 		group:       group,

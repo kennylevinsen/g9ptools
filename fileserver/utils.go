@@ -17,13 +17,12 @@ type File interface {
 
 	IsDir() (bool, error)
 
-	Parent() (File, error)
 }
 
 type Dir interface {
 	File
 
-	Rename(user, oldname, newname string) error
+	Empty() (bool, error)
 	Walk(user, name string) (File, error)
 	Create(user, name string, perms protocol.FileMode) (File, error)
 	Remove(user string, file File) error
