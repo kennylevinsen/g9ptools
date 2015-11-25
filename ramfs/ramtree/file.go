@@ -51,8 +51,9 @@ func (of *RAMOpenFile) Read(p []byte) (int, error) {
 	of.f.RLock()
 	defer of.f.RUnlock()
 	maxRead := int64(len(p))
-	if maxRead > int64(len(of.f.content))-of.offset {
-		maxRead = int64(len(of.f.content)) - of.offset
+	remaining := int64(len(of.f.content)) - of.offset
+	if maxRead > remaining {
+		maxRead = remaining
 	}
 
 	copy(p, of.f.content[of.offset:maxRead+of.offset])
@@ -94,7 +95,7 @@ func (of *RAMOpenFile) Close() error {
 
 type RAMFile struct {
 	sync.RWMutex
-	parent      fileserver.File
+	parent      fileserver.Dir
 	content     []byte
 	id          uint64
 	name        string
@@ -108,7 +109,12 @@ type RAMFile struct {
 	opens       uint
 }
 
-func (f *RAMFile) Parent() (fileserver.File, error) {
+func (f *RAMFile) SetParent(d fileserver.Dir) error {
+	f.parent = d
+	return nil
+}
+
+func (f *RAMFile) Parent() (fileserver.Dir, error) {
 	return f.parent, nil
 }
 
@@ -125,6 +131,12 @@ func (f *RAMFile) Qid() (protocol.Qid, error) {
 }
 
 func (f *RAMFile) WriteStat(s protocol.Stat) error {
+	if s.Length != ^uint64(0) {
+		if s.Length > uint64(len(f.content)) {
+			return errors.New("cannot extend length")
+		}
+		f.content = f.content[:s.Length]
+	}
 	f.name = s.Name
 	f.user = s.UID
 	f.group = s.GID

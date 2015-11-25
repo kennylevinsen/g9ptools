@@ -92,7 +92,7 @@ func (ot *RAMOpenTree) Close() error {
 
 type RAMTree struct {
 	sync.RWMutex
-	parent      fileserver.File
+	parent      fileserver.Dir
 	tree        map[string]fileserver.File
 	id          uint64
 	name        string
@@ -106,7 +106,12 @@ type RAMTree struct {
 	opens       uint
 }
 
-func (t *RAMTree) Parent() (fileserver.File, error) {
+func (t *RAMTree) SetParent(d fileserver.Dir) error {
+	t.parent = d
+	return nil
+}
+
+func (t *RAMTree) Parent() (fileserver.Dir, error) {
 	if t.parent == nil {
 		return t, nil
 	}
@@ -236,7 +241,7 @@ func (t *RAMTree) Rename(user, oldname, newname string) error {
 		return errors.New("file not found")
 	}
 	_, ok = t.tree[newname]
-	if !ok {
+	if ok {
 		return errors.New("file already exists")
 	}
 

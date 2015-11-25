@@ -1,6 +1,7 @@
 package fileserver
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -8,6 +9,18 @@ import (
 	"github.com/joushou/g9p"
 	"github.com/joushou/g9p/protocol"
 )
+
+func logreq(d protocol.Message) {
+	log.Printf("-> %T    \t%+v", d, d)
+}
+
+func logresp(d protocol.Message, err error) {
+	if err != nil {
+		log.Printf("<- *protocol.ErrorResponse    \t%v", err)
+	} else {
+		log.Printf("<- %T    \t%+v", d, d)
+	}
+}
 
 const (
 	DefaultMaxSize = (1024 * 1024 * 1024)
@@ -77,10 +90,14 @@ func (fs *FileServer) Version(r *protocol.VersionRequest) (resp *protocol.Versio
 			resp = nil
 			err = g9p.ErrFlushed
 		}
+
+		if fs.Chatty {
+			logresp(resp, err)
+		}
 	}()
 
 	if fs.Chatty {
-		log.Printf("-> Version request")
+		logreq(r)
 	}
 
 	fs.Lock()
@@ -111,10 +128,14 @@ func (fs *FileServer) Auth(r *protocol.AuthRequest) (resp *protocol.AuthResponse
 			resp = nil
 			err = g9p.ErrFlushed
 		}
+
+		if fs.Chatty {
+			logresp(resp, err)
+		}
 	}()
 
 	if fs.Chatty {
-		log.Printf("-> Auth request")
+		logreq(r)
 	}
 
 	return nil, fmt.Errorf("auth not supported")
@@ -127,10 +148,14 @@ func (fs *FileServer) Attach(r *protocol.AttachRequest) (resp *protocol.AttachRe
 			resp = nil
 			err = g9p.ErrFlushed
 		}
+
+		if fs.Chatty {
+			logresp(resp, err)
+		}
 	}()
 
 	if fs.Chatty {
-		log.Printf("-> Attach request: %s, %s", r.Username, r.Service)
+		logreq(r)
 	}
 	fs.fidLock.Lock()
 	defer fs.fidLock.Unlock()
@@ -177,10 +202,14 @@ func (fs *FileServer) Flush(r *protocol.FlushRequest) (resp *protocol.FlushRespo
 			resp = nil
 			err = g9p.ErrFlushed
 		}
+
+		if fs.Chatty {
+			logresp(resp, err)
+		}
 	}()
 
 	if fs.Chatty {
-		log.Printf("-> Flush request: %d", r.OldTag)
+		logreq(r)
 	}
 
 	fs.flush(r.OldTag)
@@ -197,17 +226,21 @@ func (fs *FileServer) Walk(r *protocol.WalkRequest) (resp *protocol.WalkResponse
 			resp = nil
 			err = g9p.ErrFlushed
 		}
+
+		if fs.Chatty {
+			logresp(resp, err)
+		}
 	}()
 
 	if fs.Chatty {
-		log.Printf("-> Walk request: %v", r.Names)
+		logreq(r)
 	}
 
 	fs.fidLock.Lock()
 	defer fs.fidLock.Unlock()
 	s, ok := fs.Fids[r.Fid]
 	if !ok {
-		return nil, fmt.Errorf("no such fid")
+		return nil, fmt.Errorf("unknown fid")
 	}
 
 	s.Lock()
@@ -239,12 +272,12 @@ func (fs *FileServer) Walk(r *protocol.WalkRequest) (resp *protocol.WalkResponse
 		return nil, err
 	}
 	if !d {
-		return nil, fmt.Errorf("fid not dir")
+		return nil, fmt.Errorf("walk -- in a non-directory")
 	}
 	root := cur
 
 	newloc := s.location
-
+	first := true
 	var qids []protocol.Qid
 	for i := range r.Names {
 		x, err := root.Open(s.username, protocol.OEXEC)
@@ -281,6 +314,9 @@ func (fs *FileServer) Walk(r *protocol.WalkRequest) (resp *protocol.WalkResponse
 				goto write
 			}
 			if root == nil {
+				if first {
+					return nil, errors.New("file does not exist")
+				}
 				goto write
 			}
 		}
@@ -302,6 +338,8 @@ func (fs *FileServer) Walk(r *protocol.WalkRequest) (resp *protocol.WalkResponse
 			}
 			fs.Fids[r.NewFid] = s
 		}
+
+		first = false
 	}
 
 write:
@@ -319,17 +357,21 @@ func (fs *FileServer) Open(r *protocol.OpenRequest) (resp *protocol.OpenResponse
 			resp = nil
 			err = g9p.ErrFlushed
 		}
+
+		if fs.Chatty {
+			logresp(resp, err)
+		}
 	}()
 
 	if fs.Chatty {
-		log.Printf("-> Open request")
+		logreq(r)
 	}
 
 	fs.fidLock.RLock()
 	defer fs.fidLock.RUnlock()
 	s, ok := fs.Fids[r.Fid]
 	if !ok {
-		return nil, fmt.Errorf("no such fid")
+		return nil, fmt.Errorf("unknown fid")
 	}
 
 	s.Lock()
@@ -361,22 +403,25 @@ func (fs *FileServer) Open(r *protocol.OpenRequest) (resp *protocol.OpenResponse
 func (fs *FileServer) Create(r *protocol.CreateRequest) (resp *protocol.CreateResponse, err error) {
 	fs.register(r)
 	defer func() {
-		log.Printf("<- Create response: %v", resp)
 		if fs.flushed(r) {
 			resp = nil
 			err = g9p.ErrFlushed
 		}
+
+		if fs.Chatty {
+			logresp(resp, err)
+		}
 	}()
 
 	if fs.Chatty {
-		log.Printf("-> Create request: %v", r.Name)
+		logreq(r)
 	}
 
 	fs.fidLock.RLock()
 	defer fs.fidLock.RUnlock()
 	s, ok := fs.Fids[r.Fid]
 	if !ok {
-		return nil, fmt.Errorf("no such fid")
+		return nil, fmt.Errorf("unknown fid")
 	}
 
 	s.Lock()
@@ -387,7 +432,7 @@ func (fs *FileServer) Create(r *protocol.CreateRequest) (resp *protocol.CreateRe
 	}
 
 	if r.Name == "." || r.Name == ".." {
-		return nil, fmt.Errorf("illegal name")
+		return nil, fmt.Errorf("file name syntax")
 	}
 
 	cur := s.location.Current()
@@ -396,7 +441,7 @@ func (fs *FileServer) Create(r *protocol.CreateRequest) (resp *protocol.CreateRe
 		return nil, err
 	}
 	if !isdir {
-		return nil, fmt.Errorf("not a directory")
+		return nil, fmt.Errorf("create -- in a non-directory")
 	}
 	t := cur.(Dir)
 
@@ -419,7 +464,8 @@ func (fs *FileServer) Create(r *protocol.CreateRequest) (resp *protocol.CreateRe
 	s.open = x
 	s.mode = r.Mode
 	resp = &protocol.CreateResponse{
-		Qid: q,
+		Qid:    q,
+		IOUnit: 0,
 	}
 
 	return resp, nil
@@ -432,17 +478,21 @@ func (fs *FileServer) Read(r *protocol.ReadRequest) (resp *protocol.ReadResponse
 			resp = nil
 			err = g9p.ErrFlushed
 		}
+
+		if fs.Chatty {
+			logresp(resp, err)
+		}
 	}()
 
 	if fs.Chatty {
-		log.Printf("-> Read request: %d", r.Count)
+		logreq(r)
 	}
 
 	fs.fidLock.RLock()
 	defer fs.fidLock.RUnlock()
 	s, ok := fs.Fids[r.Fid]
 	if !ok {
-		return nil, fmt.Errorf("no such fid")
+		return nil, fmt.Errorf("unknown fid")
 	}
 
 	s.RLock()
@@ -452,7 +502,7 @@ func (fs *FileServer) Read(r *protocol.ReadRequest) (resp *protocol.ReadResponse
 		return nil, fmt.Errorf("file not open")
 	}
 
-	if s.mode != protocol.OREAD && s.mode != protocol.ORDWR {
+	if (s.mode&3 != protocol.OREAD) && (s.mode&3) != protocol.ORDWR {
 		return nil, fmt.Errorf("file not opened for reading")
 	}
 
@@ -472,7 +522,7 @@ func (fs *FileServer) Read(r *protocol.ReadRequest) (resp *protocol.ReadResponse
 		return nil, err
 	}
 	b = b[:n]
-
+	log.Printf("Read report: %d, %d", n, len(b))
 	resp = &protocol.ReadResponse{
 		Data: b,
 	}
@@ -487,17 +537,21 @@ func (fs *FileServer) Write(r *protocol.WriteRequest) (resp *protocol.WriteRespo
 			resp = nil
 			err = g9p.ErrFlushed
 		}
+
+		if fs.Chatty {
+			logresp(resp, err)
+		}
 	}()
 
 	if fs.Chatty {
-		log.Printf("-> Write request")
+		logreq(r)
 	}
 
 	fs.fidLock.RLock()
 	defer fs.fidLock.RUnlock()
 	s, ok := fs.Fids[r.Fid]
 	if !ok {
-		return nil, fmt.Errorf("no such fid")
+		return nil, fmt.Errorf("unknown fid")
 	}
 
 	s.RLock()
@@ -507,7 +561,7 @@ func (fs *FileServer) Write(r *protocol.WriteRequest) (resp *protocol.WriteRespo
 		return nil, fmt.Errorf("file not open")
 	}
 
-	if s.mode != protocol.OWRITE && s.mode != protocol.ORDWR {
+	if (s.mode&3) != protocol.OWRITE && (s.mode%3) != protocol.ORDWR {
 		return nil, fmt.Errorf("file not opened for writing")
 	}
 
@@ -534,17 +588,21 @@ func (fs *FileServer) Clunk(r *protocol.ClunkRequest) (resp *protocol.ClunkRespo
 			resp = nil
 			err = g9p.ErrFlushed
 		}
+
+		if fs.Chatty {
+			logresp(resp, err)
+		}
 	}()
 
 	if fs.Chatty {
-		log.Printf("-> Clunk request")
+		logreq(r)
 	}
 
 	fs.fidLock.Lock()
 	defer fs.fidLock.Unlock()
 	s, ok := fs.Fids[r.Fid]
 	if !ok {
-		return nil, fmt.Errorf("no such fid")
+		return nil, fmt.Errorf("unknown fid")
 	}
 
 	s.Lock()
@@ -566,17 +624,21 @@ func (fs *FileServer) Remove(r *protocol.RemoveRequest) (resp *protocol.RemoveRe
 			resp = nil
 			err = g9p.ErrFlushed
 		}
+
+		if fs.Chatty {
+			logresp(resp, err)
+		}
 	}()
 
 	if fs.Chatty {
-		log.Printf("-> Remove request")
+		logreq(r)
 	}
 
 	fs.fidLock.Lock()
 	defer fs.fidLock.Unlock()
 	s, ok := fs.Fids[r.Fid]
 	if !ok {
-		return nil, fmt.Errorf("no such fid")
+		return nil, fmt.Errorf("unknown fid")
 	}
 	defer delete(fs.Fids, r.Fid)
 	s.Lock()
@@ -613,17 +675,21 @@ func (fs *FileServer) Stat(r *protocol.StatRequest) (resp *protocol.StatResponse
 			resp = nil
 			err = g9p.ErrFlushed
 		}
+
+		if fs.Chatty {
+			logresp(resp, err)
+		}
 	}()
 
 	if fs.Chatty {
-		log.Printf("-> Stat request")
+		logreq(r)
 	}
 
 	fs.fidLock.RLock()
 	defer fs.fidLock.RUnlock()
 	s, ok := fs.Fids[r.Fid]
 	if !ok {
-		return nil, fmt.Errorf("no such fid")
+		return nil, fmt.Errorf("unknown fid")
 	}
 
 	s.RLock()
@@ -653,30 +719,34 @@ func (fs *FileServer) WriteStat(r *protocol.WriteStatRequest) (resp *protocol.Wr
 			resp = nil
 			err = g9p.ErrFlushed
 		}
+		if fs.Chatty {
+			logresp(resp, err)
+		}
 	}()
 
 	if fs.Chatty {
-		log.Printf("-> WriteStat request")
+		logreq(r)
 	}
 
 	fs.fidLock.Lock()
 	defer fs.fidLock.Unlock()
 	s, ok := fs.Fids[r.Fid]
 	if !ok {
-		return nil, fmt.Errorf("no such fid")
+		return nil, fmt.Errorf("unknown fid")
 	}
 
 	s.Lock()
 	defer s.Unlock()
 
-	var l, p File
+	var l File
+	var p Dir
 	l = s.location.Current()
 	if l == nil {
 		return nil, fmt.Errorf("no such file")
 	}
 
 	if len(s.location) > 1 {
-		p = s.location.Parent()
+		p = s.location.Parent().(Dir)
 	}
 	if err := setStat(s.username, l, p, r.Stat); err != nil {
 		return nil, err

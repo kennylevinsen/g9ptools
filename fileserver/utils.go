@@ -25,6 +25,7 @@ type Dir interface {
 	Walk(user, name string) (File, error)
 	Create(user, name string, perms protocol.FileMode) (File, error)
 	Remove(user, name string) error
+	Rename(user, oldname, newname string) error
 }
 
 type OpenFile interface {
@@ -52,7 +53,7 @@ func (fp FilePath) Parent() File {
 	return fp[len(fp)-2]
 }
 
-func setStat(user string, e File, parent File, nstat protocol.Stat) error {
+func setStat(user string, e File, parent Dir, nstat protocol.Stat) error {
 	ostat, err := e.Stat()
 	if err != nil {
 		return err
@@ -60,6 +61,9 @@ func setStat(user string, e File, parent File, nstat protocol.Stat) error {
 
 	needWrite := false
 	needParentWrite := false
+	rename := false
+	curname := ""
+	newname := ""
 
 	if nstat.Type != ^uint16(0) && nstat.Type != ostat.Type {
 		return errors.New("it is illegal to modify type")
@@ -85,7 +89,13 @@ func setStat(user string, e File, parent File, nstat protocol.Stat) error {
 		ostat.Mtime = nstat.Mtime
 	}
 	if nstat.Length != ^uint64(0) && nstat.Length != ostat.Length {
-		return errors.New("change of not permitted")
+		if ostat.Mode&protocol.DMDIR != 0 {
+			return errors.New("cannot set length of directory")
+		}
+		if nstat.Length > ostat.Length {
+			return errors.New("cannot extend length")
+		}
+		ostat.Length = nstat.Length
 	}
 	if nstat.Name != "" && nstat.Name != ostat.Name {
 		if parent != nil {
@@ -95,9 +105,12 @@ func setStat(user string, e File, parent File, nstat protocol.Stat) error {
 				return err
 			}
 			if taken != nil {
-				return errors.New("name already taken")
+				return errors.New("file already exists")
 			}
+			curname = ostat.Name
+			newname = nstat.Name
 			ostat.Name = nstat.Name
+			rename = true
 		} else {
 			return errors.New("it is illegal to rename root")
 		}
@@ -132,6 +145,13 @@ func setStat(user string, e File, parent File, nstat protocol.Stat) error {
 			return err
 		}
 		x.Close()
+	}
+
+	// Try to perform the rename
+	if rename {
+		if err := parent.Rename(user, curname, newname); err != nil {
+			return err
+		}
 	}
 
 	return e.WriteStat(ostat)
