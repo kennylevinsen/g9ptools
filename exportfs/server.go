@@ -34,7 +34,7 @@ func main() {
 	h := func() g9p.Handler {
 		m := make(map[string]fileserver.Dir)
 		m[service] = root
-		return fileserver.NewFileServer(nil, m, 10*1024*1024, true)
+		return fileserver.NewFileServer(nil, m, 10*1024*1024, fileserver.Obnoxious)
 	}
 
 	log.Printf("Starting proxy at %s", addr)

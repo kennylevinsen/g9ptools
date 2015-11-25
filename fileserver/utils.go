@@ -60,7 +60,6 @@ func setStat(user string, e File, parent Dir, nstat protocol.Stat) error {
 	}
 
 	needWrite := false
-	needParentWrite := false
 	rename := false
 	curname := ""
 	newname := ""
@@ -99,14 +98,6 @@ func setStat(user string, e File, parent Dir, nstat protocol.Stat) error {
 	}
 	if nstat.Name != "" && nstat.Name != ostat.Name {
 		if parent != nil {
-			parent := parent.(Dir)
-			taken, err := parent.Walk(user, nstat.Name)
-			if err != nil {
-				return err
-			}
-			if taken != nil {
-				return errors.New("file already exists")
-			}
 			curname = ostat.Name
 			newname = nstat.Name
 			ostat.Name = nstat.Name
@@ -114,7 +105,6 @@ func setStat(user string, e File, parent Dir, nstat protocol.Stat) error {
 		} else {
 			return errors.New("it is illegal to rename root")
 		}
-		needParentWrite = true
 	}
 	if nstat.UID != "" && nstat.UID != ostat.UID {
 		// NOTE: It is normally illegal to change the file owner, but we are a bit more relaxed.
@@ -129,18 +119,8 @@ func setStat(user string, e File, parent Dir, nstat protocol.Stat) error {
 		return errors.New("it is illegal to modify muid")
 	}
 
-	if needParentWrite {
-		if parent != nil {
-			x, err := parent.Open(user, protocol.OWRITE)
-			if err != nil {
-				return err
-			}
-			x.Close()
-		}
-	}
-
 	if needWrite {
-		x, err := parent.Open(user, protocol.OWRITE)
+		x, err := e.Open(user, protocol.OWRITE)
 		if err != nil {
 			return err
 		}

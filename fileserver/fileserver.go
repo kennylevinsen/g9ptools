@@ -6,22 +6,21 @@ import (
 	"io"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/joushou/g9p"
 	"github.com/joushou/g9p/protocol"
 )
 
-func logreq(d protocol.Message) {
-	log.Printf("-> %T    \t%+v", d, d)
-}
+type Verbosity int
 
-func logresp(d protocol.Message, err error) {
-	if err != nil {
-		log.Printf("<- *protocol.ErrorResponse    \t%v", err)
-	} else {
-		log.Printf("<- %T    \t%+v", d, d)
-	}
-}
+const (
+	Quiet Verbosity = iota
+	Chatty
+	Loud
+	Obnoxious
+	Debug
+)
 
 const (
 	DefaultMaxSize = (1024 * 1024 * 1024)
@@ -41,13 +40,39 @@ type FileServer struct {
 	sync.RWMutex
 	Roots  map[string]Dir
 	Root   Dir
-	Chatty bool
+	Chatty Verbosity
 
 	MaxSize uint32
 	fidLock sync.RWMutex
 	Fids    map[protocol.Fid]*State
 	tagLock sync.Mutex
 	tags    map[protocol.Tag]bool
+}
+
+func (fs *FileServer) logreq(d protocol.Message) {
+	switch fs.Chatty {
+	case Chatty, Loud:
+		log.Printf("-> %T", d)
+	case Obnoxious, Debug:
+		log.Printf("-> %T    \t%+v", d, d)
+	}
+}
+
+func (fs *FileServer) logresp(d protocol.Message, err error) {
+	switch fs.Chatty {
+	case Loud:
+		if err != nil {
+			log.Printf("<- *protocol.ErrorResponse")
+		} else {
+			log.Printf("<- %T", d)
+		}
+	case Obnoxious, Debug:
+		if err != nil {
+			log.Printf("<- *protocol.ErrorResponse    \t%s", err)
+		} else {
+			log.Printf("<- %T    \t%+v", d, d)
+		}
+	}
 }
 
 func (fs *FileServer) register(d protocol.Message) error {
@@ -92,14 +117,10 @@ func (fs *FileServer) Version(r *protocol.VersionRequest) (resp *protocol.Versio
 			err = g9p.ErrFlushed
 		}
 
-		if fs.Chatty {
-			logresp(resp, err)
-		}
+		fs.logresp(resp, err)
 	}()
 
-	if fs.Chatty {
-		logreq(r)
-	}
+	fs.logreq(r)
 
 	fs.Lock()
 	defer fs.Unlock()
@@ -130,14 +151,10 @@ func (fs *FileServer) Auth(r *protocol.AuthRequest) (resp *protocol.AuthResponse
 			err = g9p.ErrFlushed
 		}
 
-		if fs.Chatty {
-			logresp(resp, err)
-		}
+		fs.logresp(resp, err)
 	}()
 
-	if fs.Chatty {
-		logreq(r)
-	}
+	fs.logreq(r)
 
 	return nil, fmt.Errorf("auth not supported")
 }
@@ -150,14 +167,10 @@ func (fs *FileServer) Attach(r *protocol.AttachRequest) (resp *protocol.AttachRe
 			err = g9p.ErrFlushed
 		}
 
-		if fs.Chatty {
-			logresp(resp, err)
-		}
+		fs.logresp(resp, err)
 	}()
 
-	if fs.Chatty {
-		logreq(r)
-	}
+	fs.logreq(r)
 	fs.fidLock.Lock()
 	defer fs.fidLock.Unlock()
 
@@ -204,14 +217,10 @@ func (fs *FileServer) Flush(r *protocol.FlushRequest) (resp *protocol.FlushRespo
 			err = g9p.ErrFlushed
 		}
 
-		if fs.Chatty {
-			logresp(resp, err)
-		}
+		fs.logresp(resp, err)
 	}()
 
-	if fs.Chatty {
-		logreq(r)
-	}
+	fs.logreq(r)
 
 	fs.flush(r.OldTag)
 
@@ -228,14 +237,10 @@ func (fs *FileServer) Walk(r *protocol.WalkRequest) (resp *protocol.WalkResponse
 			err = g9p.ErrFlushed
 		}
 
-		if fs.Chatty {
-			logresp(resp, err)
-		}
+		fs.logresp(resp, err)
 	}()
 
-	if fs.Chatty {
-		logreq(r)
-	}
+	fs.logreq(r)
 
 	fs.fidLock.Lock()
 	defer fs.fidLock.Unlock()
@@ -359,14 +364,10 @@ func (fs *FileServer) Open(r *protocol.OpenRequest) (resp *protocol.OpenResponse
 			err = g9p.ErrFlushed
 		}
 
-		if fs.Chatty {
-			logresp(resp, err)
-		}
+		fs.logresp(resp, err)
 	}()
 
-	if fs.Chatty {
-		logreq(r)
-	}
+	fs.logreq(r)
 
 	fs.fidLock.RLock()
 	defer fs.fidLock.RUnlock()
@@ -409,14 +410,10 @@ func (fs *FileServer) Create(r *protocol.CreateRequest) (resp *protocol.CreateRe
 			err = g9p.ErrFlushed
 		}
 
-		if fs.Chatty {
-			logresp(resp, err)
-		}
+		fs.logresp(resp, err)
 	}()
 
-	if fs.Chatty {
-		logreq(r)
-	}
+	fs.logreq(r)
 
 	fs.fidLock.RLock()
 	defer fs.fidLock.RUnlock()
@@ -480,14 +477,10 @@ func (fs *FileServer) Read(r *protocol.ReadRequest) (resp *protocol.ReadResponse
 			err = g9p.ErrFlushed
 		}
 
-		if fs.Chatty {
-			logresp(resp, err)
-		}
+		fs.logresp(resp, err)
 	}()
 
-	if fs.Chatty {
-		logreq(r)
-	}
+	fs.logreq(r)
 
 	fs.fidLock.RLock()
 	defer fs.fidLock.RUnlock()
@@ -540,14 +533,10 @@ func (fs *FileServer) Write(r *protocol.WriteRequest) (resp *protocol.WriteRespo
 			err = g9p.ErrFlushed
 		}
 
-		if fs.Chatty {
-			logresp(resp, err)
-		}
+		fs.logresp(resp, err)
 	}()
 
-	if fs.Chatty {
-		logreq(r)
-	}
+	fs.logreq(r)
 
 	fs.fidLock.RLock()
 	defer fs.fidLock.RUnlock()
@@ -591,14 +580,10 @@ func (fs *FileServer) Clunk(r *protocol.ClunkRequest) (resp *protocol.ClunkRespo
 			err = g9p.ErrFlushed
 		}
 
-		if fs.Chatty {
-			logresp(resp, err)
-		}
+		fs.logresp(resp, err)
 	}()
 
-	if fs.Chatty {
-		logreq(r)
-	}
+	fs.logreq(r)
 
 	fs.fidLock.Lock()
 	defer fs.fidLock.Unlock()
@@ -627,14 +612,10 @@ func (fs *FileServer) Remove(r *protocol.RemoveRequest) (resp *protocol.RemoveRe
 			err = g9p.ErrFlushed
 		}
 
-		if fs.Chatty {
-			logresp(resp, err)
-		}
+		fs.logresp(resp, err)
 	}()
 
-	if fs.Chatty {
-		logreq(r)
-	}
+	fs.logreq(r)
 
 	fs.fidLock.Lock()
 	defer fs.fidLock.Unlock()
@@ -678,14 +659,10 @@ func (fs *FileServer) Stat(r *protocol.StatRequest) (resp *protocol.StatResponse
 			err = g9p.ErrFlushed
 		}
 
-		if fs.Chatty {
-			logresp(resp, err)
-		}
+		fs.logresp(resp, err)
 	}()
 
-	if fs.Chatty {
-		logreq(r)
-	}
+	fs.logreq(r)
 
 	fs.fidLock.RLock()
 	defer fs.fidLock.RUnlock()
@@ -721,14 +698,11 @@ func (fs *FileServer) WriteStat(r *protocol.WriteStatRequest) (resp *protocol.Wr
 			resp = nil
 			err = g9p.ErrFlushed
 		}
-		if fs.Chatty {
-			logresp(resp, err)
-		}
+
+		fs.logresp(resp, err)
 	}()
 
-	if fs.Chatty {
-		logreq(r)
-	}
+	fs.logreq(r)
 
 	fs.fidLock.Lock()
 	defer fs.fidLock.Unlock()
@@ -757,13 +731,24 @@ func (fs *FileServer) WriteStat(r *protocol.WriteStatRequest) (resp *protocol.Wr
 	return &protocol.WriteStatResponse{}, nil
 }
 
-func NewFileServer(root Dir, roots map[string]Dir, maxSize uint32, chatty bool) *FileServer {
-	return &FileServer{
+func NewFileServer(root Dir, roots map[string]Dir, maxSize uint32, chat Verbosity) *FileServer {
+	fs := &FileServer{
 		Root:    root,
 		Roots:   roots,
 		MaxSize: maxSize,
-		Chatty:  chatty,
+		Chatty:  chat,
 		Fids:    make(map[protocol.Fid]*State),
 		tags:    make(map[protocol.Tag]bool),
 	}
+
+	if chat == Debug {
+		go func() {
+			t := time.Tick(10 * time.Second)
+			for range t {
+				log.Printf("Open fids: %d", len(fs.Fids))
+			}
+		}()
+	}
+
+	return fs
 }

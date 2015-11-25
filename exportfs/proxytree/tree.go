@@ -190,7 +190,7 @@ func (pf *ProxyFile) Qid() (protocol.Qid, error) {
 }
 
 func (pf *ProxyFile) Name() (string, error) {
-	if pe.path == "" {
+	if pf.path == "" {
 		return "/", nil
 	}
 	return filepath.Base(pf.path), nil

@@ -3,12 +3,15 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
+	"github.com/chzyer/readline"
 	"github.com/joushou/g9ptools/convenience"
 )
 
 func main() {
-	if len(os.Args) < 5 {
+	loop := true
+	if len(os.Args) < 4 {
 		fmt.Printf("Too few arguments\n")
 		return
 	}
@@ -24,58 +27,99 @@ func main() {
 		return
 	}
 
-	switch os.Args[4] {
-	case "ls":
-		p := "/"
-		if len(os.Args) >= 6 {
-			p = os.Args[5]
+	var cmds map[string]func(string)
+	cmds = map[string]func(string){
+		"ls": func(s string) {
+			if s == "" {
+				s = "/"
+			}
+			strs, err := c.List(s)
+			if err != nil {
+				fmt.Printf("ls failed: %v\n", err)
+				return
+			}
+			fmt.Printf("%v\n", strs)
+		},
+		"cat": func(s string) {
+			strs, err := c.Read(s)
+			if err != nil {
+				fmt.Printf("cat failed: %v\n", err)
+				return
+			}
+			fmt.Printf("%v\n", strs)
+		},
+		"get": func(string) {
+			fmt.Printf("get is not yet implemented\n")
+		},
+		"put": func(string) {
+			fmt.Printf("put is not yet implemented\n")
+		},
+		"mkdir": func(s string) {
+			err := c.Create(s, true)
+			if err != nil {
+				fmt.Printf("mkdir failed: %v\n", err)
+				return
+			}
+		},
+		"rm": func(s string) {
+			err := c.Remove(s)
+			if err != nil {
+				fmt.Printf("rm failed: %v\n", err)
+				return
+			}
+		},
+		"chmod": func(string) {
+			fmt.Printf("chmod is not yet implemented\n")
+		},
+		"quit": func(string) {
+			fmt.Printf("bye\n")
+			loop = false
+		},
+		"help": func(string) {
+			fmt.Printf("Available commands: \n")
+			for k := range cmds {
+				fmt.Printf("\t%s\n", k)
+			}
+		},
+	}
+
+	completer := readline.NewPrefixCompleter()
+	for k := range cmds {
+		completer.Children = append(completer.Children, readline.PcItem(k))
+	}
+
+	rl, err := readline.NewEx(&readline.Config{
+		Prompt:       "9p> ",
+		AutoComplete: completer,
+	})
+
+	if err != nil {
+		fmt.Printf("failed to create readline: %v\n", err)
+		return
+	}
+
+	defer rl.Close()
+
+	for loop {
+		line, err := rl.Readline()
+		if err != nil { // io.EOF
+			break
 		}
-		strs, err := c.List(p)
-		if err != nil {
-			fmt.Printf("cmd failed: %v\n", err)
-			return
+
+		idx := strings.Index(line, " ")
+		var cmd, args string
+		if idx != -1 {
+			cmd = line[:idx]
+			args = line[idx+1:]
+		} else {
+			cmd = line
 		}
-		fmt.Printf("%v\n", strs)
-	case "cat":
-		if len(os.Args) < 6 {
-			fmt.Printf("not enough arguments\n")
+
+		f, ok := cmds[cmd]
+		if !ok {
+			fmt.Printf("no such command: [%s]\n", cmd)
+			continue
 		}
-		p := os.Args[5]
-		strs, err := c.Read(p)
-		if err != nil {
-			fmt.Printf("cmd failed: %v\n", err)
-			return
-		}
-		fmt.Printf("%v\n", strs)
-	case "touch":
-		if len(os.Args) < 6 {
-			fmt.Printf("not enough arguments\n")
-		}
-		p := os.Args[5]
-		err := c.Create(p, false)
-		if err != nil {
-			fmt.Printf("cmd failed: %v\n", err)
-			return
-		}
-	case "mkdir":
-		if len(os.Args) < 6 {
-			fmt.Printf("not enough arguments\n")
-		}
-		p := os.Args[5]
-		err := c.Create(p, true)
-		if err != nil {
-			fmt.Printf("cmd failed: %v\n", err)
-			return
-		}
-	case "rm":
-		if len(os.Args) < 6 {
-			fmt.Printf("not enough arguments\n")
-		}
-		p := os.Args[5]
-		err := c.Remove(p)
-		if err != nil {
-			fmt.Printf("cmd failed: %v\n", err)
-			return
-		}
+		f(args)
 	}
 }
