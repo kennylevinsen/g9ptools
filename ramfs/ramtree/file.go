@@ -36,7 +36,7 @@ func (of *RAMOpenFile) Seek(offset int64, whence int) (int64, error) {
 	}
 
 	if offset > int64(len(of.f.content)) {
-		return of.offset, errors.New("seek past length")
+		offset = int64(len(of.f.content))
 	}
 
 	of.offset = offset

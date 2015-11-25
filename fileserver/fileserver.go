@@ -3,6 +3,7 @@ package fileserver
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"sync"
 
@@ -518,11 +519,12 @@ func (fs *FileServer) Read(r *protocol.ReadRequest) (resp *protocol.ReadResponse
 		return nil, err
 	}
 	n, err := s.open.Read(b)
-	if err != nil {
+	if err == io.EOF {
+		n = 0
+	} else if err != nil {
 		return nil, err
 	}
 	b = b[:n]
-	log.Printf("Read report: %d, %d", n, len(b))
 	resp = &protocol.ReadResponse{
 		Data: b,
 	}

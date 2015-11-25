@@ -12,15 +12,20 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 3 {
+	if len(os.Args) < 6 {
 		fmt.Printf("Too few arguments\n")
+		fmt.Printf("%s path service UID GID address\n", os.Args[0])
+		fmt.Printf("UID and GID are the user/group that owns /\n")
 		return
 	}
 
 	path := os.Args[1]
-	addr := os.Args[2]
+	service := os.Args[2]
+	user := os.Args[3]
+	group := os.Args[4]
+	addr := os.Args[5]
 
-	root := proxytree.NewProxyTree(path)
+	root := proxytree.NewProxyTree(path, "", user, group)
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
 		log.Fatalf("Unable to listen: %v", err)
@@ -28,7 +33,7 @@ func main() {
 
 	h := func() g9p.Handler {
 		m := make(map[string]fileserver.Dir)
-		m["proxyfs"] = root
+		m[service] = root
 		return fileserver.NewFileServer(nil, m, 10*1024*1024, true)
 	}
 

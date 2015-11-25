@@ -2,13 +2,12 @@ package proxytree
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"os"
-	"os/user"
 	"path/filepath"
-	"strconv"
 	"sync"
-	"syscall"
 
 	"github.com/joushou/g9p/protocol"
 	"github.com/joushou/g9ptools/fileserver"
@@ -75,7 +74,7 @@ func (ot *ProxyOpenTree) update() error {
 
 	for _, f := range dir {
 		pf := &ProxyFile{
-			path: f.Name(), //filepath.Join(ot.path, f.Name()),
+			path: f.Name(),
 			info: f,
 		}
 
@@ -147,6 +146,8 @@ type ProxyFile struct {
 	path    string
 	info    os.FileInfo
 	caching int
+	user    string
+	group   string
 }
 
 func (pf *ProxyFile) updateInfo() error {
@@ -171,18 +172,15 @@ func (pf *ProxyFile) Qid() (protocol.Qid, error) {
 		return protocol.Qid{}, err
 	}
 
-	var path uint64
-	switch s := pf.info.Sys().(type) {
-	case *syscall.Stat_t:
-		path = s.Ino
-	default:
-		return protocol.Qid{}, errors.New("unknown stat struct")
-	}
-
 	var tp protocol.QidType
 	if pf.info.IsDir() {
 		tp |= protocol.QTDIR
 	}
+
+	// This is not entirely correct as a path, as removing and recreating the
+	// file should give a new path, but... What the hell.
+	chk := sha256.Sum224([]byte(filepath.Join(pf.root, pf.path)))
+	path := binary.LittleEndian.Uint64(chk[:8])
 
 	return protocol.Qid{
 		Path:    path,
@@ -191,16 +189,24 @@ func (pf *ProxyFile) Qid() (protocol.Qid, error) {
 	}, nil
 }
 
-func (pe *ProxyFile) Name() (string, error) {
-	n := filepath.Base(pe.path)
-	if n == "" {
+func (pf *ProxyFile) Name() (string, error) {
+	if pe.path == "" {
 		return "/", nil
 	}
-	return n, nil
+	return filepath.Base(pf.path), nil
 }
 
-func (*ProxyFile) WriteStat(s protocol.Stat) error {
-	return errors.New("not implemented")
+func (pf *ProxyFile) WriteStat(s protocol.Stat) error {
+	n := filepath.Base(pf.path)
+	if s.Name != "" && s.Name != n {
+		d := filepath.Dir(pf.path)
+		pf.path = filepath.Join(d, s.Name)
+	}
+
+	// NOTE(kl): We ignore everything else. This is incorrect, but most things
+	// don't make sense to touch, and the actual rename has already ocurred
+	// anyway.
+	return nil
 }
 
 func (pf *ProxyFile) Stat() (protocol.Stat, error) {
@@ -212,32 +218,22 @@ func (pf *ProxyFile) Stat() (protocol.Stat, error) {
 
 	var err error
 	st := protocol.Stat{}
-	switch s := pf.info.Sys().(type) {
-	case *syscall.Stat_t:
-		st.Qid, err = pf.Qid()
-		if err != nil {
-			return protocol.Stat{}, err
-		}
-		st.Mode = protocol.FileMode(pf.info.Mode() & 0777)
-		if s.Mode&syscall.S_IFDIR != 0 {
-			st.Mode |= protocol.DMDIR
-		}
-		st.Atime = uint32(pf.info.ModTime().Unix())
-		st.Mtime = st.Mtime
-		st.Length = uint64(pf.info.Size())
-		st.Name = filepath.Base(pf.path)
-		st.UID = strconv.Itoa(int(s.Uid))
-		st.GID = strconv.Itoa(int(s.Gid))
-		st.MUID = st.UID
-	default:
-		// TODO(kl): ERROR!
-		return protocol.Stat{}, errors.New("unknown stat struct")
-	}
 
-	u, err := user.LookupId(st.UID)
-	if err == nil {
-		st.UID = u.Username
+	st.Qid, err = pf.Qid()
+	if err != nil {
+		return protocol.Stat{}, err
 	}
+	st.Mode = protocol.FileMode(pf.info.Mode() & 0777)
+	if pf.info.IsDir() {
+		st.Mode |= protocol.DMDIR
+	}
+	st.Atime = uint32(pf.info.ModTime().Unix())
+	st.Mtime = st.Mtime
+	st.Length = uint64(pf.info.Size())
+	st.Name = filepath.Base(pf.path)
+	st.UID = pf.user
+	st.GID = pf.user
+	st.MUID = pf.user
 
 	return st, nil
 }
@@ -266,7 +262,7 @@ func (pf *ProxyFile) Open(_ string, mode protocol.OpenMode) (fileserver.OpenFile
 }
 
 func (pf *ProxyFile) CanRemove() (bool, error) {
-	return false, nil
+	return true, nil
 }
 
 func (pf *ProxyFile) Walk(_, name string) (fileserver.File, error) {
@@ -310,20 +306,24 @@ func (pf *ProxyFile) Remove(_, name string) error {
 	return os.Remove(filepath.Join(pf.root, p))
 }
 
+func (pf *ProxyFile) Rename(_, oldname, newname string) error {
+	op := filepath.Join(pf.root, filepath.Join(pf.path, oldname))
+	np := filepath.Join(pf.root, filepath.Join(pf.path, newname))
+	return os.Rename(op, np)
+}
+
 func (pf *ProxyFile) IsDir() (bool, error) {
 	if err := pf.updateInfo(); err != nil {
 		return false, err
 	}
-	switch s := pf.info.Sys().(type) {
-	case *syscall.Stat_t:
-		return s.Mode&syscall.S_IFDIR != 0, nil
-	default:
-		return false, errors.New("unknown stat type")
-	}
+	return pf.info.IsDir(), nil
 }
 
-func NewProxyTree(root string) fileserver.Dir {
+func NewProxyTree(root, path, user, group string) fileserver.Dir {
 	return &ProxyFile{
-		root: root,
+		root:  root,
+		path:  path,
+		user:  user,
+		group: group,
 	}
 }

@@ -57,7 +57,10 @@ func (ot *RAMOpenTree) Seek(offset int64, whence int) (int64, error) {
 	}
 
 	ot.offset = offset
-	ot.update()
+	err := ot.update()
+	if err != nil {
+		return 0, err
+	}
 	ot.t.atime = time.Now()
 	return ot.offset, nil
 }

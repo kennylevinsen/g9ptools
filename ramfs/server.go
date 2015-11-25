@@ -12,16 +12,17 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 4 {
+	if len(os.Args) < 5 {
 		fmt.Printf("Too few arguments\n")
-		fmt.Printf("%s UID GID address\n", os.Args[0])
+		fmt.Printf("%s service UID GID address\n", os.Args[0])
 		fmt.Printf("UID and GID are the user/group that owns /\n")
 		return
 	}
 
-	user := os.Args[1]
-	group := os.Args[2]
-	addr := os.Args[3]
+	service := os.Args[1]
+	user := os.Args[2]
+	group := os.Args[3]
+	addr := os.Args[4]
 
 	root := ramtree.NewRAMTree("/", 0777, user, group)
 	l, err := net.Listen("tcp", addr)
@@ -31,7 +32,7 @@ func main() {
 
 	h := func() g9p.Handler {
 		m := make(map[string]fileserver.Dir)
-		m["ramfs"] = root
+		m[service] = root
 		return fileserver.NewFileServer(nil, m, 10*1024*1024, true)
 	}
 
