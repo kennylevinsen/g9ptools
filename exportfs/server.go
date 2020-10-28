@@ -6,9 +6,9 @@ import (
 	"net"
 	"os"
 
-	"github.com/joushou/g9p"
-	"github.com/joushou/g9ptools/exportfs/proxytree"
-	"github.com/joushou/g9ptools/fileserver"
+	"github.com/kennylevinsen/g9p"
+	"github.com/kennylevinsen/g9ptools/exportfs/proxytree"
+	"github.com/kennylevinsen/g9ptools/fileserver"
 )
 
 func main() {

@@ -6,9 +6,9 @@ import (
 	"net"
 	"os"
 
-	"github.com/joushou/g9p"
-	"github.com/joushou/g9ptools/fileserver"
-	"github.com/joushou/g9ptools/ramfs/ramtree"
+	"github.com/kennylevinsen/g9p"
+	"github.com/kennylevinsen/g9ptools/fileserver"
+	"github.com/kennylevinsen/g9ptools/ramfs/ramtree"
 )
 
 func main() {

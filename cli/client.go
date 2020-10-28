@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/chzyer/readline"
-	"github.com/joushou/g9ptools/convenience"
+	"github.com/kennylevinsen/g9ptools/convenience"
 )
 
 func main() {

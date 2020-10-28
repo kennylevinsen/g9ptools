@@ -3,7 +3,7 @@ package ramtree
 import (
 	"sync"
 
-	"github.com/joushou/g9p/protocol"
+	"github.com/kennylevinsen/g9p/protocol"
 )
 
 var (

@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/joushou/g9p/protocol"
-	"github.com/joushou/g9ptools/fileserver"
+	"github.com/kennylevinsen/g9p/protocol"
+	"github.com/kennylevinsen/g9ptools/fileserver"
 )
 
 type RAMOpenFile struct {

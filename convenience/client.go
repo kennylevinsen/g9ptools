@@ -8,8 +8,8 @@ import (
 	"path"
 	"strings"
 
-	"github.com/joushou/g9p"
-	"github.com/joushou/g9p/protocol"
+	"github.com/kennylevinsen/g9p"
+	"github.com/kennylevinsen/g9p/protocol"
 )
 
 const (

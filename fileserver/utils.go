@@ -3,7 +3,7 @@ package fileserver
 import (
 	"errors"
 
-	"github.com/joushou/g9p/protocol"
+	"github.com/kennylevinsen/g9p/protocol"
 )
 
 type File interface {
